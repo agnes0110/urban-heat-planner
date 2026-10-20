@@ -742,6 +742,11 @@
       const fb = document.getElementById("modal-feedback");
       if (fb) fb.classList.add("hidden");
 
+      setTimeout(() => {
+        const inp = document.getElementById("api-key-input");
+        if (inp) inp.focus();
+      }, 100);
+
       try {
         const res = await fetch("/api/agent-status");
         if (res.ok) {
@@ -862,12 +867,16 @@
       updateAdkBadge(currentPlan.adk_live_llm);
       renderAll();
     });
+
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeKeyModal();
+    });
   </script>
 
   <!-- ADK Agent & Gemini API Key Modal -->
-  <div id="key-modal" class="hidden fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
-    <div class="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl max-w-lg w-full p-6 text-slate-200 relative">
-      <button onclick="closeKeyModal()" class="absolute top-4 right-4 text-slate-400 hover:text-white text-lg font-bold">✕</button>
+  <div id="key-modal" onclick="if(event.target === this) closeKeyModal()" class="hidden fixed inset-0 z-[99999] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4" style="z-index: 99999;">
+    <div class="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl max-w-lg w-full p-6 text-slate-200 relative z-[100000]" style="z-index: 100000;">
+      <button onclick="closeKeyModal()" class="absolute top-4 right-4 text-slate-400 hover:text-white text-xl font-bold p-1 rounded-lg hover:bg-slate-800 transition cursor-pointer" aria-label="Close modal">✕</button>
       
       <div class="flex items-center gap-2.5 mb-4">
         <div class="w-8 h-8 rounded-lg bg-orange-500/20 border border-orange-500/40 flex items-center justify-center text-lg">🤖</div>
