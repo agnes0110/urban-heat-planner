@@ -32,8 +32,8 @@
       background: rgba(15, 23, 42, 0.96) !important;
     }
     .leaflet-popup-content {
-      margin: 10px 12px !important;
-      line-height: 1.4 !important;
+      margin: 14px 16px !important;
+      line-height: 1.5 !important;
     }
     /* Hide default number input arrows for cleaner look */
     input[type="number"]::-webkit-inner-spin-button,
@@ -322,6 +322,14 @@
       ).addTo(map);
 
       layerGroup = L.layerGroup().addTo(map);
+
+      // Dynamically scale the floating card and marker icons whenever the user zooms in/out
+      map.on("zoomend", () => {
+        if (currentPlan) {
+          renderMapLayers();
+          updateSelectedNeighborhoodUI();
+        }
+      });
     }
 
     function getPolygonColor(offset) {
@@ -364,14 +372,16 @@
         isCardOpen = false;
         closeFloatingCard();
         renderAll();
+        map.flyTo([32.790, -96.745], 11, { duration: 0.45 });
       } else {
         selectedTractId = tractId;
         isCardOpen = true;
-        renderAll();
         const n = currentPlan.neighborhoods.find((item) => item.id === selectedTractId);
         if (n) {
-          map.panTo([n.lat + 0.015, n.lon + 0.035], { animate: true });
+          const targetZoom = Math.max(map.getZoom(), 12);
+          map.flyTo([n.lat + 0.014, n.lon + 0.018], targetZoom, { duration: 0.45 });
         }
+        renderAll();
       }
     }
 
@@ -450,21 +460,49 @@
     function renderMapLayers() {
       layerGroup.clearLayers();
 
+      // First pass: soft continuous thermal glow across the whole Dallas region
+      currentPlan.neighborhoods.forEach((n) => {
+        const color = getPolygonColor(n.predicted_offset_f);
+        L.circle([n.lat, n.lon], {
+          radius: 5200,
+          stroke: false,
+          fillColor: color,
+          fillOpacity: 0.12,
+          interactive: false,
+        }).addTo(layerGroup);
+      });
+
+      // Second pass: contiguous multi-vertex neighborhood heat zones covering Dallas
+      currentPlan.neighborhoods.forEach((n) => {
+        const isSelected = n.id === selectedTractId && isCardOpen;
+        const color = getPolygonColor(n.predicted_offset_f);
+
+        const poly = L.polygon(n.polygon, {
+          color: isSelected ? "#ffffff" : "rgba(15, 23, 42, 0.75)",
+          weight: isSelected ? 3 : 1.5,
+          lineJoin: "round",
+          lineCap: "round",
+          fillColor: color,
+          fillOpacity: isSelected ? 0.52 : 0.34,
+        }).addTo(layerGroup);
+
+        if (isSelected) {
+          poly.bringToFront();
+        }
+
+        poly.on("click", () => toggleNeighborhood(n.id));
+      });
+
+      // Third pass: center badge markers showing Truck / Wellness icon or Rank (scales with map zoom)
+      const zoom = map ? map.getZoom() : 11;
+      const zoomSteps = Math.max(0, zoom - 11);
+      const iconDim = Math.min(46, 34 + zoomSteps * 4);
+      const iconFont = Math.min(18, 14 + zoomSteps * 1.5);
+
       currentPlan.neighborhoods.forEach((n, idx) => {
         const isSelected = n.id === selectedTractId && isCardOpen;
         const color = getPolygonColor(n.predicted_offset_f);
 
-        // Shaded neighborhood area polygon
-        const poly = L.polygon(n.polygon, {
-          color: isSelected ? "#ffffff" : color,
-          weight: isSelected ? 3 : 1.8,
-          fillColor: color,
-          fillOpacity: isSelected ? 0.45 : 0.22,
-        }).addTo(layerGroup);
-
-        poly.on("click", () => toggleNeighborhood(n.id));
-
-        // Center badge marker showing Truck / Wellness icon or Rank
         const badgeIcon = n.unit_type === "hydration_truck"
           ? "🚚"
           : n.unit_type === "wellness_team"
@@ -474,11 +512,11 @@
         const markerHtml = `
           <div style="
             display:flex;align-items:center;justify-content:center;
-            width:30px;height:30px;border-radius:9999px;
+            width:${iconDim}px;height:${iconDim}px;border-radius:9999px;
             background:${isSelected ? "#f97316" : "#0f172a"};
-            border:2px solid ${isSelected ? "#ffffff" : color};
-            color:#ffffff;font-size:12px;font-weight:700;
-            box-shadow:0 4px 10px rgba(0,0,0,0.6);
+            border:2.5px solid ${isSelected ? "#ffffff" : color};
+            color:#ffffff;font-size:${iconFont}px;font-weight:800;
+            box-shadow:0 4px 12px rgba(0,0,0,0.65);
           ">
             ${badgeIcon}
           </div>
@@ -488,8 +526,8 @@
           icon: L.divIcon({
             className: "",
             html: markerHtml,
-            iconSize: [30, 30],
-            iconAnchor: [15, 15],
+            iconSize: [iconDim, iconDim],
+            iconAnchor: [iconDim / 2, iconDim / 2],
           }),
         }).addTo(layerGroup);
 
@@ -538,40 +576,54 @@
         ? n.tri_agency_dispatch.electricity_grid_response.alert_level.split("(")[0].trim()
         : "ROUTINE WATCH";
 
+      // At 100% city view (zoom <= 11), keep the card compact (225px) so it doesn't block the mapped area;
+      // when zoomed in (zoom >= 12), expand the card width and font sizes for easy reading.
+      const zoom = map ? map.getZoom() : 11;
+      const isZoomedIn = zoom >= 12;
+      const zoomSteps = Math.max(0, zoom - 11);
+      const cardWidth = isZoomedIn ? Math.min(380, 290 + zoomSteps * 30) : 225;
+      const titleSize = isZoomedIn ? Math.min(17, 14 + zoomSteps * 1.0) : 12;
+      const bodySize = isZoomedIn ? Math.min(14.5, 12.5 + zoomSteps * 0.8) : 11;
+      const metaSize = isZoomedIn ? Math.min(13.5, 11.5 + zoomSteps * 0.8) : 10.5;
+      const badgeSize = isZoomedIn ? Math.min(12.5, 10.5 + zoomSteps * 0.6) : 9.5;
+
       const popupHtml = `
-        <div style="width:265px;">
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px;">
-            <span style="font-weight:700;font-size:12px;color:#ffffff;">${n.name}</span>
-            <div style="display:flex;align-items:center;gap:4px;">
-              <span style="background:rgba(168,85,247,0.25);color:#d8b4fe;border:1px solid rgba(168,85,247,0.5);font-weight:700;font-size:9px;padding:1px 5px;border-radius:4px;">
+        <div style="width:${cardWidth}px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:${isZoomedIn ? 6 : 4}px;">
+            <span style="font-weight:800;font-size:${titleSize}px;color:#ffffff;line-height:1.25;">${n.name}</span>
+            <div style="display:flex;align-items:center;gap:4px;shrink:0;">
+              <span style="background:rgba(168,85,247,0.28);color:#e9d5ff;border:1px solid rgba(168,85,247,0.55);font-weight:700;font-size:${badgeSize}px;padding:1px 5px;border-radius:5px;white-space:nowrap;">
                 UVI ${n.universal_vulnerability_index.toFixed(1)}
               </span>
-              <span style="background:#f97316;color:#0f172a;font-weight:800;font-size:10px;padding:1px 6px;border-radius:4px;">
+              <span style="background:#f97316;color:#0f172a;font-weight:800;font-size:${badgeSize}px;padding:1px 6px;border-radius:5px;white-space:nowrap;">
                 +${n.predicted_offset_f.toFixed(1)}°F
               </span>
-              <button onclick="toggleNeighborhood('${n.id}')" style="color:#94a3b8;font-size:14px;font-weight:700;line-height:1;cursor:pointer;" title="Close">×</button>
+              <button onclick="toggleNeighborhood('${n.id}')" style="color:#cbd5e1;font-size:${isZoomedIn ? 17 : 14}px;font-weight:800;line-height:1;cursor:pointer;padding:0 2px;" title="Close">×</button>
             </div>
           </div>
-          <div style="font-size:11px;color:#cbd5e1;margin-bottom:6px;">
+          <div style="font-size:${bodySize}px;color:#f1f5f9;margin-bottom:${isZoomedIn ? 8 : 5}px;line-height:1.4;">
             <strong style="color:#fda4af;">Why it's hotter:</strong> ${n.why_short}
           </div>
-          <div style="font-size:10.5px;padding-top:5px;border-top:1px solid rgba(148,163,184,0.2);display:flex;flex-direction:column;gap:2px;">
-            <div><strong style="color:#94a3b8;">🚑 Unit:</strong> ${unitLabel} <span style="color:#64748b;">(${n.cooling_center_type}: ${n.capacity_status})</span></div>
-            <div><strong style="color:#94a3b8;">🏥 Hospital:</strong> <span style="color:#fca5a5;">${hospAlert}</span></div>
-            <div><strong style="color:#94a3b8;">⚡ Grid:</strong> <span style="color:#fde047;">${gridAlert}</span></div>
+          <div style="font-size:${metaSize}px;padding-top:${isZoomedIn ? 6 : 4}px;border-top:1px solid rgba(148,163,184,0.28);display:flex;flex-direction:column;gap:2px;">
+            <div><strong style="color:#cbd5e1;">🚑 Unit:</strong> ${unitLabel} <span style="color:#94a3b8;">(${n.cooling_center_type}: ${n.capacity_status})</span></div>
+            ${isZoomedIn ? `
+            <div><strong style="color:#cbd5e1;">🏥 Hospital:</strong> <span style="color:#fca5a5;font-weight:600;">${hospAlert}</span></div>
+            <div><strong style="color:#cbd5e1;">⚡ Grid:</strong> <span style="color:#fde047;font-weight:600;">${gridAlert}</span></div>
+            ` : ""}
           </div>
         </div>
       `;
 
-      // Anchor callout just above the top edge of the neighborhood polygon so it doesn't collide with the right-side ranking list
-      const northLat = n.polygon[0][0];
+      // Anchor callout just above the neighborhood marker so it sits cleanly inside the contiguous zone
       activePopup = L.popup({
+        maxWidth: 420,
+        minWidth: cardWidth,
         closeButton: false,
         autoClose: true,
         closeOnClick: false,
-        offset: [0, -6],
+        offset: [0, -16],
       })
-        .setLatLng([northLat, n.lon])
+        .setLatLng([n.lat, n.lon])
         .setContent(popupHtml)
         .openOn(map);
     }

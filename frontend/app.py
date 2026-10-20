@@ -30,9 +30,48 @@ except ImportError:
 # ---------------------------------------------------------------------------
 def _load_agent_tools_module():
     """Loads `agent/tools.py` directly so `_build_tri_agency_action_plan` and
-    BigQuery tools work even if optional `dotenv` / `google-adk` packages are
-    not installed in a lightweight local preview environment.
+    BigQuery tools work even if optional `dotenv` / `requests` / `google-adk`
+    packages are not installed in a lightweight local preview environment.
     """
+    try:
+        import dotenv  # noqa: F401
+    except ImportError:
+        dotenv_mod = types.ModuleType("dotenv")
+        dotenv_mod.load_dotenv = lambda *args, **kwargs: False  # type: ignore[attr-defined]
+        sys.modules["dotenv"] = dotenv_mod
+
+    try:
+        import requests  # noqa: F401
+    except ImportError:
+        import urllib.parse
+        import urllib.request
+
+        req_mod = types.ModuleType("requests")
+
+        class _SimpleResponse:
+            def __init__(self, status_code: int, body: bytes):
+                self.status_code = status_code
+                self._body = body
+
+            def raise_for_status(self) -> None:
+                if self.status_code >= 400:
+                    raise RuntimeError(f"HTTP {self.status_code}")
+
+            def json(self) -> Any:
+                return json.loads(self._body.decode("utf-8"))
+
+        def _requests_get(url: str, params: Optional[Dict[str, Any]] = None, timeout: float = 8.0, headers: Optional[Dict[str, str]] = None) -> _SimpleResponse:
+            full_url = url
+            if params:
+                qs = urllib.parse.urlencode(params)
+                full_url = f"{url}?{qs}"
+            req = urllib.request.Request(full_url, headers=headers or {"User-Agent": "DallasUrbanHeatPlanner/1.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return _SimpleResponse(resp.status, resp.read())
+
+        req_mod.get = _requests_get  # type: ignore[attr-defined]
+        sys.modules["requests"] = req_mod
+
     try:
         import google.cloud.bigquery  # noqa: F401
         has_bq = True
@@ -48,10 +87,25 @@ def _load_agent_tools_module():
         google_mod.cloud = cloud_mod
         sys.modules["google.cloud.bigquery"] = bq_mod
 
+    # Ensure `agent` package stub exists for relative imports (`from .config import ...`)
+    if "agent" not in sys.modules:
+        agent_pkg = types.ModuleType("agent")
+        agent_pkg.__path__ = [str(REPO_ROOT / "agent")]  # type: ignore[attr-defined]
+        sys.modules["agent"] = agent_pkg
+
+    config_path = REPO_ROOT / "agent" / "config.py"
+    if config_path.exists() and "agent.config" not in sys.modules:
+        cfg_spec = importlib.util.spec_from_file_location("agent.config", config_path)
+        cfg_mod = importlib.util.module_from_spec(cfg_spec)
+        assert cfg_spec and cfg_spec.loader
+        sys.modules["agent.config"] = cfg_mod
+        cfg_spec.loader.exec_module(cfg_mod)
+
     tools_path = REPO_ROOT / "agent" / "tools.py"
-    spec = importlib.util.spec_from_file_location("agent_tools_direct", tools_path)
+    spec = importlib.util.spec_from_file_location("agent.tools", tools_path)
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
+    sys.modules["agent.tools"] = module
     spec.loader.exec_module(module)
     return module, has_bq
 
@@ -74,15 +128,16 @@ except Exception:
     ADK_ROOT_AGENT = None
     HAS_ADK_RUNTIME = False
 
-PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "qwiklabs-gcp-04-f8ba79cf4618")
-DATASET = os.environ.get("BQ_DATASET", "a4i_climate")
-UVI_TABLE_NAME = os.environ.get("BQ_TABLE", "Agent_Universal_Vulnaribility_Index")
+PROJECT_ID = getattr(AGENT_TOOLS, "PROJECT_ID", os.environ.get("GOOGLE_CLOUD_PROJECT", "qwiklabs-gcp-04-f8ba79cf4618"))
+DATASET = getattr(AGENT_TOOLS, "DATASET_ID", os.environ.get("BQ_DATASET", "a4i_climate"))
+UVI_TABLE_NAME = getattr(AGENT_TOOLS, "TABLE_NAME", os.environ.get("BQ_TABLE", "Agent_Universal_Vulnaribility_Index"))
 
 DALLAS_BASELINE = {
     "city": "Dallas",
     "source_table": f"{PROJECT_ID}.{DATASET}.{UVI_TABLE_NAME}",
     "agent_name": "dallas_heat_emergency_commander",
     "sub_agents": [
+        "historic_heat_data_agent",
         "microclimate_risk_agent",
         "triage_dispatch_agent",
         "equity_audit_agent",
@@ -106,12 +161,19 @@ DALLAS_NEIGHBORHOODS: List[Dict[str, Any]] = [
         "name": "South Dallas / Fair Park",
         "intersection": "MLK Jr Blvd & S Malcolm X Blvd",
         "lat": 32.7684,
-        "lon": -96.7698,
+        "lon": -96.7640,
         "polygon": [
-            [32.778, -96.781],
-            [32.778, -96.758],
-            [32.759, -96.758],
-            [32.759, -96.781],
+            [32.805, -96.805],
+            [32.812, -96.772],
+            [32.808, -96.738],
+            [32.790, -96.725],
+            [32.765, -96.720],
+            [32.738, -96.728],
+            [32.722, -96.748],
+            [32.720, -96.775],
+            [32.735, -96.792],
+            [32.758, -96.802],
+            [32.782, -96.808],
         ],
         "observed_avg_temp": 108.4,
         "predicted_offset_f": 4.8,
@@ -141,13 +203,19 @@ DALLAS_NEIGHBORHOODS: List[Dict[str, Any]] = [
         "id": "48113009604",
         "name": "Oak Cliff / Marsalis Corridor",
         "intersection": "S Marsalis Ave & E Jefferson Blvd",
-        "lat": 32.7432,
-        "lon": -96.8154,
+        "lat": 32.7380,
+        "lon": -96.8320,
         "polygon": [
-            [32.752, -96.826],
-            [32.752, -96.804],
-            [32.734, -96.804],
-            [32.734, -96.826],
+            [32.762, -96.885],
+            [32.766, -96.842],
+            [32.758, -96.802],
+            [32.735, -96.792],
+            [32.720, -96.775],
+            [32.702, -96.795],
+            [32.696, -96.835],
+            [32.705, -96.875],
+            [32.728, -96.896],
+            [32.748, -96.894],
         ],
         "observed_avg_temp": 108.1,
         "predicted_offset_f": 4.6,
@@ -177,13 +245,19 @@ DALLAS_NEIGHBORHOODS: List[Dict[str, Any]] = [
         "id": "48113018110",
         "name": "Buckner Terrace / East Dallas",
         "intersection": "S Buckner Blvd & Bruton Rd",
-        "lat": 32.7495,
-        "lon": -96.6832,
+        "lat": 32.7620,
+        "lon": -96.6820,
         "polygon": [
-            [32.759, -96.695],
-            [32.759, -96.671],
-            [32.740, -96.671],
-            [32.740, -96.695],
+            [32.808, -96.738],
+            [32.816, -96.698],
+            [32.806, -96.655],
+            [32.782, -96.638],
+            [32.750, -96.642],
+            [32.726, -96.665],
+            [32.722, -96.705],
+            [32.738, -96.728],
+            [32.765, -96.720],
+            [32.790, -96.725],
         ],
         "observed_avg_temp": 107.8,
         "predicted_offset_f": 4.4,
@@ -213,13 +287,19 @@ DALLAS_NEIGHBORHOODS: List[Dict[str, Any]] = [
         "id": "48113013605",
         "name": "West Dallas / Singleton Corridor",
         "intersection": "Singleton Blvd & N Hampton Rd",
-        "lat": 32.7788,
-        "lon": -96.8562,
+        "lat": 32.7850,
+        "lon": -96.8580,
         "polygon": [
-            [32.788, -96.868],
-            [32.788, -96.844],
-            [32.769, -96.844],
-            [32.769, -96.868],
+            [32.815, -96.905],
+            [32.820, -96.862],
+            [32.814, -96.828],
+            [32.805, -96.805],
+            [32.782, -96.808],
+            [32.758, -96.802],
+            [32.766, -96.842],
+            [32.762, -96.885],
+            [32.778, -96.912],
+            [32.798, -96.915],
         ],
         "observed_avg_temp": 107.1,
         "predicted_offset_f": 3.9,
@@ -249,13 +329,18 @@ DALLAS_NEIGHBORHOODS: List[Dict[str, Any]] = [
         "id": "48113013721",
         "name": "Bachman Lake / Northwest Hwy",
         "intersection": "Webb Chapel Rd & W Northwest Hwy",
-        "lat": 32.8564,
-        "lon": -96.8735,
+        "lat": 32.8480,
+        "lon": -96.8620,
         "polygon": [
-            [32.865, -96.885],
-            [32.865, -96.861],
-            [32.847, -96.861],
-            [32.847, -96.885],
+            [32.885, -96.902],
+            [32.892, -96.858],
+            [32.884, -96.818],
+            [32.852, -96.812],
+            [32.814, -96.828],
+            [32.820, -96.862],
+            [32.815, -96.905],
+            [32.842, -96.918],
+            [32.868, -96.914],
         ],
         "observed_avg_temp": 106.5,
         "predicted_offset_f": 3.5,
@@ -285,13 +370,20 @@ DALLAS_NEIGHBORHOODS: List[Dict[str, Any]] = [
         "id": "48439113622",
         "name": "North Dallas Suburban Tract",
         "intersection": "Preston Rd & Arapaho Rd",
-        "lat": 32.8210,
-        "lon": -96.7980,
+        "lat": 32.8520,
+        "lon": -96.7620,
         "polygon": [
-            [32.830, -96.810],
-            [32.830, -96.786],
-            [32.812, -96.786],
-            [32.812, -96.810],
+            [32.884, -96.818],
+            [32.895, -96.775],
+            [32.890, -96.725],
+            [32.865, -96.692],
+            [32.835, -96.688],
+            [32.816, -96.698],
+            [32.808, -96.738],
+            [32.812, -96.772],
+            [32.805, -96.805],
+            [32.814, -96.828],
+            [32.852, -96.812],
         ],
         "observed_avg_temp": 103.6,
         "predicted_offset_f": 0.8,
