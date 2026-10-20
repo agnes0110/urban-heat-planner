@@ -149,11 +149,11 @@ HAS_ADK_RUNTIME = is_adk_live_runtime_active()
 
 PROJECT_ID = getattr(AGENT_TOOLS, "PROJECT_ID", os.environ.get("GOOGLE_CLOUD_PROJECT", "qwiklabs-gcp-04-f8ba79cf4618"))
 DATASET = getattr(AGENT_TOOLS, "DATASET_ID", os.environ.get("BQ_DATASET", "a4i_climate"))
-UVI_TABLE_NAME = getattr(AGENT_TOOLS, "TABLE_NAME", os.environ.get("BQ_TABLE", "Agent_Universal_Vulnaribility_Index"))
+BQML_OFFSET_MODEL_NAME = getattr(AGENT_TOOLS, "BQML_OFFSET_MODEL_NAME", os.environ.get("BQML_OFFSET_MODEL_NAME", "heat_offset_model"))
 
 DALLAS_BASELINE = {
     "city": "Dallas",
-    "source_table": f"{PROJECT_ID}.{DATASET}.{UVI_TABLE_NAME}",
+    "source_model": f"{PROJECT_ID}.{DATASET}.{BQML_OFFSET_MODEL_NAME}",
     "agent_name": "dallas_heat_emergency_commander",
     "sub_agents": [
         "historic_heat_data_agent",
@@ -173,7 +173,7 @@ DALLAS_BASELINE = {
     "city_avg_senior_pct": 11.4,
 }
 
-# Grounded in `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`
+# Grounded in `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model` (`v_tract_heat_features`)
 DALLAS_NEIGHBORHOODS: List[Dict[str, Any]] = [
     {
         "id": "48113019211",
@@ -752,9 +752,9 @@ async def build_chat_response(payload: Dict[str, Any]) -> Dict[str, Any]:
     elif is_equity_q:
         highlight_id = "48439113622"
         reply = (
-            "**⚖️ Equity & UVI Audit (`equity_audit_agent` — `Agent_Universal_Vulnaribility_Index`):**\n\n"
-            "- **1. Strip the Variable:** Zero race or ethnicity columns are used in `Agent_Universal_Vulnaribility_Index`.\n"
-            "- **2. Why North Dallas (`48439113622`) is Skipped:** Although it has **1,779 seniors**, its **Universal Vulnerability Index (UVI) is only `24.5`** (`Green Area - Unlikely Heat Wave`, 4 parks, Public Library `Under Capacity`, **`0` carless households**, and only `+0.8°F` microclimate offset).\n"
+            "**⚖️ Equity & UVI Audit (`equity_audit_agent` — `heat_offset_model`):**\n\n"
+            "- **1. Strip the Variable:** Zero race/ethnicity columns are used in `heat_offset_model` (`v_tract_heat_features`).\n"
+            "- **2. Why North Dallas (`48439113622`) is Skipped:** Although it has **1,779 seniors**, its **Universal Vulnerability Index (UVI) is only `24.5`** (`Green Area - Unlikely Heat Wave`, 4 parks, Public Library `Under Capacity`, **`0` carless households**, and only `+0.8°F` offset).\n"
             "- **3. Audit the Outcome:** We redirect your **$"
             f"{plan['total_cost']:,}** dispatch to **South Dallas (`UVI 124.6`)**, **Oak Cliff (`UVI 119.8`)**, and **Buckner Terrace (`UVI 112.4`)**, where cooling centers are **`Over Capacity`** and **`380–412` households per tract lack a vehicle** (`3.1x` higher than city baseline)."
         )

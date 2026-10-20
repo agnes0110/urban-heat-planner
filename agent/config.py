@@ -24,9 +24,12 @@ DATASET_ID: str = dataset
 DANGEROUS_THRESHOLD_TEMP: float = dangerous_threshold_temp
 
 # ---------------------------------------------------------------------------
-# BigQuery Table Names & Fully-Qualified Identifiers
+# BigQuery ML Model & Feature Source + Historic Tables
 # ---------------------------------------------------------------------------
-TABLE_NAME: str = os.environ.get("BQ_TABLE", "Agent_Universal_Vulnaribility_Index")
+BQML_OFFSET_MODEL_NAME: str = os.environ.get("BQ_MODEL", "heat_offset_model")
+FEATURES_TABLE_NAME: str = os.environ.get("BQ_FEATURES_TABLE", "v_tract_heat_features")
+
+# Historic tables (stay the exact same: used EXCLUSIVELY by historic_heat_data_agent)
 HEAT_OBSERVATIONS_TABLE_NAME: str = os.environ.get(
     "BQ_HEAT_OBSERVATIONS_TABLE", "heat_observations"
 )
@@ -34,13 +37,18 @@ STATION_DAILY_TEMPS_TABLE_NAME: str = os.environ.get(
     "BQ_STATION_TEMPS_TABLE", "station_daily_temps"
 )
 
-UVI_TABLE: str = f"`{PROJECT_ID}.{DATASET_ID}.{TABLE_NAME}`"
+BQML_OFFSET_MODEL: str = f"`{PROJECT_ID}.{DATASET_ID}.{BQML_OFFSET_MODEL_NAME}`"
+FEATURES_TABLE: str = f"`{PROJECT_ID}.{DATASET_ID}.{FEATURES_TABLE_NAME}`"
 HEAT_OBSERVATIONS_TABLE: str = (
     f"`{PROJECT_ID}.{DATASET_ID}.{HEAT_OBSERVATIONS_TABLE_NAME}`"
 )
 STATION_DAILY_TEMPS_TABLE: str = (
     f"`{PROJECT_ID}.{DATASET_ID}.{STATION_DAILY_TEMPS_TABLE_NAME}`"
 )
+
+# Backwards-compatible aliases pointing to heat_offset_model / v_tract_heat_features
+TABLE_NAME: str = BQML_OFFSET_MODEL_NAME
+UVI_TABLE: str = FEATURES_TABLE
 
 # ---------------------------------------------------------------------------
 # Model & Dallas Geography Defaults
@@ -57,6 +65,10 @@ class AgentConfig:
     project_id: str = PROJECT_ID
     dataset: str = DATASET
     dangerous_threshold_temp: float = DANGEROUS_THRESHOLD_TEMP
+    bqml_offset_model_name: str = BQML_OFFSET_MODEL_NAME
+    bqml_offset_model: str = BQML_OFFSET_MODEL
+    features_table_name: str = FEATURES_TABLE_NAME
+    features_table: str = FEATURES_TABLE
     table_name: str = TABLE_NAME
     uvi_table: str = UVI_TABLE
     heat_observations_table: str = HEAT_OBSERVATIONS_TABLE
@@ -67,4 +79,3 @@ class AgentConfig:
 
 
 CONFIG = AgentConfig()
-

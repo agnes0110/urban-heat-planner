@@ -5,8 +5,8 @@
 1. **Historic Heat & 7-Year Station Frequency Agent (`historic_heat_data_agent`)** — Grounded **100% exclusively** in the 2 historic BigQuery tables (NO Google Search, NO invented data, NO other tables):
    - `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.station_daily_temps` (`27,187` daily maximum temperature records across `16` regional NOAA weather stations from `2019-01-01` to `2025-12-31`, peak `111.9°F`)
    - `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_observations` (`19,491` street-level NOAA Heat Watch traverse readings across Dallas, `100.90°F` to `110.10°F`, mean `105.32°F`)
-2. **Operational Vulnerability, Tri-Agency Dispatch & Equity Agents (`microclimate_risk_agent`, `triage_dispatch_agent`, `equity_audit_agent`)** — Grounded in:
-   - `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index` (`85` valid Dallas census tracts)
+2. **Operational Vulnerability, Tri-Agency Dispatch & Equity Agents (`microclimate_risk_agent`, `triage_dispatch_agent`, `equity_audit_agent`)** — Grounded in BigQuery ML `ML.EXPLAIN_PREDICT`:
+   - `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model` (`LINEAR_REGRESSION`, evaluated over `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.v_tract_heat_features` across `549` valid Dallas census tracts)
 
 ---
 
@@ -20,23 +20,23 @@
   - Columns: `longitude`, `latitude`, `city`, `temp_f`, `heat_index_f`, `humidity_pct`, `observed_at`
   - Answers street-level Heat Watch campaign distribution (`19,491` points in Dallas, offsets `-4.42°F` to `+4.78°F` vs. `105.32°F` campaign mean) and coordinate-radius lookups. (`observed_at`, `heat_index_f`, and `humidity_pct` are `NULL` in the Dallas load and are never fabricated.)
 
-### B. Operational Vulnerability Table (`Agent_Universal_Vulnaribility_Index`)
-The `Agent_Universal_Vulnaribility_Index` table tracks climate vulnerability, extreme heat risks, and urban infrastructure characteristics at the geographic area (`geo_id`) level within Dallas (`85` valid census tracts):
+### B. Operational BigQuery ML Model (`heat_offset_model` + `v_tract_heat_features`)
+All operational predictions, vulnerability rankings, Tri-Agency dispatches, and equity audits query BigQuery ML `ML.EXPLAIN_PREDICT` on **`qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model`** (`LINEAR_REGRESSION`, MAE = `0.30°F`, R² = `0.48`), evaluated over `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.v_tract_heat_features` (`549` valid Dallas census tracts: `47` measured Heat Watch tracts + `502` unmeasured predicted tracts):
 
-- **Geographic Identifiers & Location**: `geo_id`, `city`, `latitude`, `longitude`
-- **Climate & Temperature Metrics**: `observed_avg_temp`, `heat_wave_risk_flag`, and the composite `universal_vulnerability_index`
-- **Demographics & Mobility**: `average_age`, `households`, and vehicle access (`no_cars`)
-- **Urban Environment & Resilience Infrastructure**: `urban_density_status`, `greenery_status`, `nearby_parks`, `cooling_center_type`, `capacity_status`, and `energy_grid_status`
+- **Geographic Identifiers & Location**: `geo_id`, `tract_lat`, `tract_lon`, `is_measured`, `dist_to_centroid_km`
+- **BigQuery ML `ML.EXPLAIN_PREDICT` Outputs**: `predicted_heat_offset_f`, `baseline_prediction_value`, `prediction_value`, and `top_feature_attributions` (`STRUCT(5 AS top_k_features)`)
+- **Climate & Temperature Metrics**: `avg_temp_f`, `heat_wave_risk_flag`, `risk_level`, and the composite `universal_vulnerability_index`
+- **Demographics & Mobility**: `median_age` (`average_age`), `households`, `no_cars`, `no_vehicle_rate`, `poverty_rate`, `seniors_65_plus`
+- **Urban Environment & Resilience Infrastructure**: `urban_density_status`, `greenery_status`, `nearby_parks`, `cooling_center_type`, `capacity_status`, `energy_grid_status`, `building_age_years`, `surrounding_3km_housing_density`
 
 ### The 3 Pillars of the Universal Vulnerability Index (UVI)
 1. **Health Access (CMS Medicare)**: Checks for nearby hospitals using Zip Code proxies. If a region has zero nearby hospitals, its risk score (`universal_vulnerability_index`) increases.
-2. **Energy Stress (NOAA Weather)**: Calculates Cooling Degree Days (CDD) for 2023 (`energy_grid_status`, `observed_avg_temp`, `heat_wave_risk_flag`) to measure regional power grid demand for air conditioning.
+2. **Energy Stress (NOAA Weather)**: Calculates Cooling Degree Days (CDD) for 2023 (`energy_grid_status`, `heat_wave_risk_flag`) to measure regional power grid demand for air conditioning.
 3. **Urban Heat Island (OpenStreetMap)**: Counts building density within 1km of each region via `ST_DWithin` (`urban_density_status`, `greenery_status`, `nearby_parks`). High density means more concrete, less airflow, and higher trapped heat (Albedo effect).
 
 ### C. BigQuery ML `ML.EXPLAIN_PREDICT` Explainability
-Operational tools (`predict_point_heat_offset`, `recommend_emergency_deployments`, and `compare_deployment_sites` in [`agent/tools.py`](file:///config/urban-heat-planner/agent/tools.py) plus `explain_predict_point_heat_risk` and `get_top_emergency_tracts` in [`agent/tools.yaml`](file:///config/urban-heat-planner/agent/tools.yaml)) execute live BigQuery ML `ML.EXPLAIN_PREDICT` queries against:
-- **`qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.predict_heat_risk_model`** (`LOGISTIC_REGRESSION`, ROC AUC = 0.916): Predicts `predicted_risk_level`, `probability`, and exact `top_feature_attributions` (`STRUCT(6 AS top_k_features)`) over `average_age`, `no_cars`, `households`, `nearby_parks`, `latitude`, and `longitude` from `Agent_Universal_Vulnaribility_Index`.
-- **`qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model`** (`LINEAR_REGRESSION`, MAE = 0.30°F, R² = 0.48): Predicts `predicted_heat_offset_f` (`bqml_predicted_heat_offset_f`) and top feature attributions (`STRUCT(5 AS top_k_features)`).
+Operational tools (`predict_point_heat_offset`, `recommend_emergency_deployments`, `compare_deployment_sites`, `get_city_uvi_and_infrastructure_summary`, and `audit_deployment_equity` in [`agent/tools.py`](file:///config/urban-heat-planner/agent/tools.py) plus the declarative SQL tools in [`agent/tools.yaml`](file:///config/urban-heat-planner/agent/tools.yaml)) execute live BigQuery ML `ML.EXPLAIN_PREDICT` queries against:
+- **`qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model`** (`LINEAR_REGRESSION`, MAE = 0.30°F, R² = 0.48): Predicts `predicted_heat_offset_f` (`bqml_predicted_heat_offset_f`), `baseline_prediction_value`, and top 5 feature attributions (`STRUCT(5 AS top_k_features)`) across all 549 Dallas census tracts in `v_tract_heat_features`.
 
 ---
 
@@ -55,7 +55,7 @@ Instead of only telling a city *"it's hot,"* our agent system coordinates **thre
 - **[`agent/agent.py`](file:///config/urban-heat-planner/agent/agent.py)**:
   - `root_agent` (`dallas_heat_emergency_commander`)
   - `historic_heat_data_agent` (Strictly & exclusively queries `station_daily_temps` and `heat_observations` — 7-year station frequency, annual trends, and street-level Heat Watch campaign data)
-  - `microclimate_risk_agent` (UVI 3-pillar & microclimate diagnostics from `Agent_Universal_Vulnaribility_Index`)
+  - `microclimate_risk_agent` (BigQuery ML `ML.EXPLAIN_PREDICT` on `heat_offset_model` & UVI 3-pillar diagnostics)
   - `triage_dispatch_agent` (Spatially de-clustered Tri-Agency dispatch & site comparison)
   - `equity_audit_agent` (3-Step Equity Audit: *"Strip the variable. Audit the outcome. Say you did both."*)
 - **[`agent/tools.py`](file:///config/urban-heat-planner/agent/tools.py)**:
@@ -64,7 +64,7 @@ Instead of only telling a city *"it's hot,"* our agent system coordinates **thre
     2. `get_station_daily_temp_history(threshold_f=100.0, station_filter="", start_year=2019, end_year=2025)`
     3. `get_historic_heat_observations(threshold_f=105.0, top_n=10, min_lat=None, max_lat=None, min_lon=None, max_lon=None)`
     4. `get_historic_location_profile(latitude, longitude, radius_km=1.5, threshold_f=100.0)`
-  - **Operational Vulnerability & Dispatch Tools (`Agent_Universal_Vulnaribility_Index` ONLY)**:
+  - **Operational Vulnerability & Dispatch Tools (`heat_offset_model` via `ML.EXPLAIN_PREDICT`)**:
     5. `predict_point_heat_offset(latitude, longitude, forecast_high_f=102.0)`
     6. `recommend_emergency_deployments(forecast_high_f=102.0, num_units=4, min_spacing_km=1.2, priority_mode="balanced")`
     7. `compare_deployment_sites(lat_a, lon_a, label_a, lat_b, lon_b, label_b, forecast_high_f=102.0)`

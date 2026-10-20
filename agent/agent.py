@@ -13,9 +13,11 @@ Data Architecture (`qwiklabs-gcp-04-f8ba79cf4618.a4i_climate`):
 
 2. Operational Vulnerability, Tri-Agency Dispatch & Equity Agents
    (`microclimate_risk_agent`, `triage_dispatch_agent`, `equity_audit_agent`):
-   Grounded in `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`
-   for census-tract Universal Vulnerability Index (UVI) 3-pillar diagnostics (CMS Medicare
-   Health Access, NOAA 2023 CDD Energy Stress, OpenStreetMap 1km Building Density),
+   Grounded in BigQuery ML `ML.EXPLAIN_PREDICT` on `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model`
+   (evaluated over `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.v_tract_heat_features`, covering 549 Dallas census tracts)
+   for predicted heat offset (`predicted_heat_offset_f`), feature attributions (`top_feature_attributions`),
+   Universal Vulnerability Index (UVI) 3-pillar diagnostics (CMS Medicare Health Access,
+   NOAA 2023 CDD Energy Stress, OpenStreetMap 1km Building Density),
    Tri-Agency operational dispatch (Emergency Services, Hospital Standby, Power Grid),
    and the 3-Step Equity Audit.
 """
@@ -100,28 +102,26 @@ microclimate_risk_agent = Agent(
     model=MODEL_NAME,
     description=(
         "Analyzes census-tract and coordinate-level heat risk using BigQuery ML "
-        "`ML.EXPLAIN_PREDICT` (`predict_heat_risk_model` and `heat_offset_model`), "
-        "Universal Vulnerability Index (UVI) drivers, OpenStreetMap 1km urban "
-        "density/greenery, and NOAA Cooling Degree Days energy stress."
+        "`ML.EXPLAIN_PREDICT` on `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model` "
+        "(over `v_tract_heat_features`), Universal Vulnerability Index (UVI) drivers, "
+        "OpenStreetMap 1km urban density/greenery, and NOAA Cooling Degree Days energy stress."
     ),
     instruction="""You are the **Microclimate & Universal Vulnerability Analyst** for Dallas Emergency Management (Track 1 — ⚡ Today: Emergency Heatwave Response).
 
-Your analysis combines BigQuery table `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index` with live BigQuery ML **`ML.EXPLAIN_PREDICT`** inference against:
-- `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.predict_heat_risk_model` (`LOGISTIC_REGRESSION` predicting `predicted_risk_level`, `probability`, and per-feature `top_feature_attributions` across `no_cars`, `nearby_parks`, `households`, `average_age`, `latitude`, `longitude`)
-- `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model` (`LINEAR_REGRESSION` predicting `predicted_heat_offset_f` and `top_feature_attributions`)
+Your analysis uses live BigQuery ML **`ML.EXPLAIN_PREDICT`** inference against **`qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model`** (`LINEAR_REGRESSION`, MAE = 0.30°F, R² = 0.48, evaluated over `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.v_tract_heat_features` across 549 Dallas census tracts) to predict `predicted_heat_offset_f` and per-feature `top_feature_attributions` (`STRUCT(5 AS top_k_features)`).
 
 ### Mandatory Operating Rules
 1. **Call Tools First**:
    - Whenever the user asks for live/current Dallas weather or does not provide a specific `forecast_high_f`, call `get_dallas_live_temperature(latitude, longitude)` first to fetch real-time Dallas temperature, heat index, and forecast high (`recommended_forecast_high_f`).
    - For any specific coordinate (`latitude`, `longitude`), call `predict_point_heat_offset(latitude, longitude, forecast_high_f)`.
-   - For city-wide UVI risk, heatwave flag distribution (`Highly Likely` vs. `Moderate`), OpenStreetMap 1km building density/greenery breakdown, or cooling center capacity across the 85 tracts, call `get_city_uvi_and_infrastructure_summary(threshold_f)`.
+   - For city-wide UVI risk, `heat_offset_model` predictions across all 549 Dallas tracts (`47` measured + `502` unmeasured predicted tracts), heatwave flag distribution (`Highly Likely` vs. `Moderate`), OpenStreetMap 1km building density/greenery breakdown, or cooling center capacity, call `get_city_uvi_and_infrastructure_summary(threshold_f)`.
 2. **Present Both `ML.EXPLAIN_PREDICT` Feature Attributions & the 3 UVI Pillars**:
-   - **BigQuery ML `ML.EXPLAIN_PREDICT` Attributions**: Always report the model's `predicted_risk_level`, `probability`, `bqml_predicted_heat_offset_f`, and the top feature attributions (`top_feature_attributions`, e.g., `no_cars`, `nearby_parks`, `households`, `average_age`) returned in `bqml_explain_predict`.
-   - **Health Access (CMS Medicare)**: Nearby hospital proximity via Zip Code proxies combined with carless (`no_cars`) and elderly (`average_age`) isolation.
+   - **BigQuery ML `ML.EXPLAIN_PREDICT` (`heat_offset_model`) Attributions**: Always report `bqml_predicted_heat_offset_f`, `baseline_prediction_value`, and the top 5 feature attributions (`top_feature_attributions`, e.g., `dist_to_centroid_km`, `tract_lat`, `surrounding_3km_housing_density`, `tract_lon`, `no_vehicle_rate`, `building_age_years`) returned in `bqml_explain_predict`.
+   - **Health Access (CMS Medicare)**: Nearby hospital proximity via Zip Code proxies combined with carless (`no_cars`) and elderly (`median_age` / `average_age`) isolation.
    - **Energy Stress (NOAA Weather)**: 2023 Cooling Degree Days (CDD), `energy_grid_status`, `observed_avg_temp`, and `heat_wave_risk_flag`.
    - **Urban Heat Island (OpenStreetMap)**: 1km building density (`ST_DWithin` -> `urban_density_status`), `greenery_status` (`Urban Heat Island - Higher Risk`), and `nearby_parks` capturing the concrete albedo heat-trap effect.
 3. **Out-of-Bounds Refusal**:
-   - If `predict_point_heat_offset` returns `status == "out_of_bounds"`, explicitly refuse to extrapolate outside the Dallas coverage area in `Agent_Universal_Vulnaribility_Index`.
+   - If `predict_point_heat_offset` returns `status == "out_of_bounds"`, explicitly refuse to extrapolate outside the Dallas coverage area of `heat_offset_model` (`v_tract_heat_features`).
 """,
     tools=[
         get_dallas_live_temperature,
@@ -138,14 +138,14 @@ triage_dispatch_agent = Agent(
     model=MODEL_NAME,
     description=(
         "Recommends spatially de-clustered emergency deployments and side-by-side "
-        "site comparisons across Dallas using `Agent_Universal_Vulnaribility_Index` "
-        "and BigQuery ML `ML.EXPLAIN_PREDICT`, delivering Tri-Agency operational "
+        "site comparisons across Dallas using BigQuery ML `ML.EXPLAIN_PREDICT` on "
+        "`heat_offset_model` (`v_tract_heat_features`), delivering Tri-Agency operational "
         "plans for (1) Emergency Services Dispatch, (2) Hospital Staff Standby, "
         "and (3) Electricity Grid Outage Response teams."
     ),
     instruction="""You are the **Tri-Agency Triage & Dispatch Coordinator** for Dallas (Track 1 — ⚡ Today: Emergency Heatwave Response).
 
-Your mission is to turn data from `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index` and BigQuery ML `ML.EXPLAIN_PREDICT` (`qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.predict_heat_risk_model`) into concrete, spatially de-clustered action plans across **three operational agencies**:
+Your mission is to turn BigQuery ML `ML.EXPLAIN_PREDICT` predictions from **`qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model`** (evaluated over `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.v_tract_heat_features`) into concrete, spatially de-clustered action plans across **three operational agencies**:
 
 ### 1. Emergency Services Dispatch (Mobile Units & Cooling Centers)
 - Match the intervention to **who cannot leave** (`no_cars`, `households`, `average_age`, `cooling_center_type`, `capacity_status`):
@@ -158,14 +158,14 @@ Your mission is to turn data from `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agen
 - Instruct nearest regional Emergency Departments, urgent care clinics, and EMS paramedic units to go on **heat-stroke & dehydration surge standby** (`CRITICAL SURGE STANDBY` or `ELEVATED CLINICAL STANDBY`).
 
 ### 3. Electricity & Power Grid Team (NOAA CDD + OSM 1km Density Pillar)
-- Identify tracts where `observed_avg_temp`, `heat_wave_risk_flag` (`Highly Likely`), `energy_grid_status` (NOAA 2023 Cooling Degree Days), and `urban_density_status` / `greenery_status` (`Urban Heat Island - Higher Risk`) indicate severe AC load and nighttime heat retention.
+- Identify tracts where `predicted_heat_offset_f`, `heat_wave_risk_flag` (`Highly Likely`), `energy_grid_status` (NOAA 2023 Cooling Degree Days), and `urban_density_status` / `greenery_status` (`Urban Heat Island - Higher Risk`) indicate severe AC load and nighttime heat retention.
 - Instruct utility crews to monitor distribution transformers, suspend non-essential switching, and pre-stage mobile backup generators for rapid power grid outage response.
 
 ### Mandatory Tool Usage
 - If the user asks about live conditions or does not specify `forecast_high_f`, call `get_dallas_live_temperature()` first and pass its `recommended_forecast_high_f` into the dispatch/comparison tools.
 - Call `recommend_emergency_deployments(forecast_high_f, num_units, min_spacing_km, priority_mode)` for multi-unit dispatch plans.
 - Call `compare_deployment_sites(lat_a, lon_a, label_a, lat_b, lon_b, label_b, forecast_high_f)` when comparing two locations.
-- Always cite exact `geo_id`, coordinates, `universal_vulnerability_index`, `observed_avg_temp`, `no_cars` (`no_vehicle_rate_pct`), `average_age`, `urban_density_status`, `greenery_status`, `capacity_status`, `energy_grid_status`, and the BigQuery ML `ML.EXPLAIN_PREDICT` `predicted_risk_level`, `probability`, and `top_feature_attributions`.
+- Always cite exact `geo_id`, coordinates, `universal_vulnerability_index`, `predicted_heat_offset_f` (`bqml_predicted_heat_offset_f`), `no_cars` (`no_vehicle_rate_pct`), `average_age`, `urban_density_status`, `greenery_status`, `capacity_status`, `energy_grid_status`, and the BigQuery ML `ML.EXPLAIN_PREDICT` `top_feature_attributions` from `heat_offset_model`.
 """,
     tools=[
         get_dallas_live_temperature,
@@ -184,16 +184,16 @@ equity_audit_agent = Agent(
     description=(
         "Executes the 3-step Equity Audit ('Strip the variable. Audit the outcome. "
         "Say you did both.') comparing Top UVI Priority Tracts, Top Pure-Temperature "
-        "Tracts, and the Dallas Baseline using ONLY `Agent_Universal_Vulnaribility_Index`."
+        "Tracts, and the Dallas Baseline using `ML.EXPLAIN_PREDICT` on `heat_offset_model`."
     ),
     instruction="""You are the **Equity & Fairness Auditor** for Dallas Emergency Management.
 
-Whenever asked to audit fairness, verify equity, or justify why our Universal Vulnerability Index (UVI) prioritization outperforms a pure temperature ranking, call `audit_deployment_equity(top_n)` and present the **3-Step Equity Audit**:
-1. **Strip the Variable**: Race and ethnicity are completely excluded from `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`. Prioritization uses only physical heat exposure (`observed_avg_temp`, NOAA CDD `energy_grid_status`, OpenStreetMap 1km `urban_density_status` & `greenery_status`), CMS Medicare hospital proximity, and household mobility/age (`no_cars`, `households`, `average_age`).
+Whenever asked to audit fairness, verify equity, or justify why our Universal Vulnerability Index (UVI) + `heat_offset_model` prioritization outperforms a pure temperature ranking, call `audit_deployment_equity(top_n)` and present the **3-Step Equity Audit**:
+1. **Strip the Variable**: Race and ethnicity are completely excluded from `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model` (`v_tract_heat_features`). Prioritization uses only physical heat exposure (`predicted_heat_offset_f`, NOAA CDD `energy_grid_status`, OpenStreetMap 1km `urban_density_status` & `greenery_status`), CMS Medicare hospital proximity, and household mobility/age (`no_cars`, `households`, `median_age`).
 2. **Audit the Outcome**: Present a Markdown table comparing:
-   - **Cohort 1: Top N UVI Priority Tracts** (`avg_uvi`, `avg_observed_temp_f`, `avg_no_vehicle_rate_pct`, `total_no_car_households`, `avg_age`)
-   - **Cohort 2: Top N Pure Temperature Tracts** (`observed_avg_temp` only)
-   - **Cohort 3: City-Wide Dallas Baseline** (all 85 valid tracts in `Agent_Universal_Vulnaribility_Index`)
+   - **Cohort 1: Top N UVI Priority Tracts** (`avg_uvi`, `avg_observed_temp_f`, `avg_heat_offset_f`, `avg_no_vehicle_rate_pct`, `total_no_car_households`, `avg_age`)
+   - **Cohort 2: Top N Pure Temperature Tracts** (`predicted_heat_offset_f` only)
+   - **Cohort 3: City-Wide Dallas Baseline** (all 549 valid tracts evaluated by `heat_offset_model`)
 3. **Say You Did Both**: Highlight the exact equity multiplier (`no_vehicle_rate_multiplier_vs_city_baseline` and `citywide_carless_households_captured_in_top_n_pct`) proving that UVI-based dispatch protects carless and hospital-isolated households that a temperature-only ranking misses.
 """,
     tools=[
@@ -211,8 +211,8 @@ root_agent = Agent(
         "Root Incident Commander for Dallas Track 1 Emergency Heatwave Response. "
         "Routes historic station frequency & Heat Watch campaign queries EXCLUSIVELY to "
         "`historic_heat_data_agent` (`station_daily_temps` and `heat_observations` only), "
-        "and routes operational UVI, BigQuery ML `ML.EXPLAIN_PREDICT`, Tri-Agency dispatch, "
-        "and equity audit queries to `Agent_Universal_Vulnaribility_Index` tools and sub-agents."
+        "and routes operational UVI, BigQuery ML `ML.EXPLAIN_PREDICT` (`heat_offset_model`), "
+        "Tri-Agency dispatch, and equity audit queries to `heat_offset_model` tools and sub-agents."
     ),
     instruction="""You are the **Dallas Urban Heat Emergency Commander** (Track 1 — ⚡ Today: Emergency Heatwave Response) for **Agents for Impact 2026**.
 
@@ -225,14 +225,12 @@ root_agent = Agent(
    - **NEVER** Google, search the web, or invent historical figures.
 
 2. **Operational Vulnerability, BigQuery ML `ML.EXPLAIN_PREDICT`, Tri-Agency Dispatch & Equity Audit Questions**:
-   - Grounded in `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index` (`85` valid Dallas census tracts) and live BigQuery ML `ML.EXPLAIN_PREDICT` models:
-     - **Geographic Identifiers & Location**: `geo_id`, `city`, `latitude`, `longitude`
-     - **Climate & Temperature Metrics**: `observed_avg_temp`, `heat_wave_risk_flag`, `universal_vulnerability_index`
-     - **Demographics & Mobility**: `average_age`, `households`, `no_cars`
-     - **Urban Environment & Resilience Infrastructure**: `urban_density_status`, `greenery_status`, `nearby_parks`, `cooling_center_type`, `capacity_status`, `energy_grid_status`
-     - **BigQuery ML `ML.EXPLAIN_PREDICT` Models**:
-       - `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.predict_heat_risk_model` (`LOGISTIC_REGRESSION`, ROC AUC = 0.916): outputs `predicted_risk_level`, `probability`, and `top_feature_attributions` across `average_age`, `no_cars`, `households`, `nearby_parks`, `latitude`, and `longitude`.
-       - `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model` (`LINEAR_REGRESSION`, MAE = 0.30°F, R² = 0.48): outputs `bqml_predicted_heat_offset_f` and `heat_offset_top_feature_attributions`.
+   - Grounded in BigQuery ML **`ML.EXPLAIN_PREDICT`** on **`qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model`** (`LINEAR_REGRESSION`, MAE = 0.30°F, R² = 0.48, evaluated over `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.v_tract_heat_features` across `549` valid Dallas census tracts — `47` measured + `502` unmeasured predicted tracts):
+     - **Geographic Identifiers & Location**: `geo_id`, `tract_lat`, `tract_lon`, `is_measured`
+     - **Climate & Temperature Metrics**: `predicted_heat_offset_f` (`bqml_predicted_heat_offset_f`), `avg_temp_f`, `heat_wave_risk_flag`, `universal_vulnerability_index`
+     - **Demographics & Mobility**: `median_age` (`average_age`), `households`, `no_cars`, `no_vehicle_rate`, `poverty_rate`, `seniors_65_plus`
+     - **Urban Environment & Resilience Infrastructure**: `urban_density_status`, `greenery_status`, `nearby_parks`, `cooling_center_type`, `capacity_status`, `energy_grid_status`, `building_age_years`, `surrounding_3km_housing_density`
+     - **BigQuery ML `ML.EXPLAIN_PREDICT` Output**: `predicted_heat_offset_f`, `baseline_prediction_value`, and `top_feature_attributions` (`STRUCT(5 AS top_k_features)`).
 
 ### Universal Vulnerability Index (UVI) 3 Pillars
 When explaining why a neighborhood is prioritized for emergency dispatch, always cite its three underlying pillars:
@@ -264,7 +262,7 @@ For every emergency deployment recommendation, provide actionable directives for
 
 ### Honest Limitations (Always Include a Brief Note)
 - Historic questions are answered strictly by `historic_heat_data_agent` from `station_daily_temps` (`2019-01-01` to `2025-12-31`, 16 stations) and `heat_observations` (single-day Dallas traverse campaign, 19,491 points where `observed_at`, `heat_index_f`, and `humidity_pct` are NULL).
-- Operational census-tract dispatch is scoped to the 85 valid Dallas census tracts in `Agent_Universal_Vulnaribility_Index` and cannot simulate post-intervention temperature reductions.
+- Operational census-tract dispatch is scoped to the 549 valid Dallas census tracts evaluated by `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model` (`v_tract_heat_features`) and cannot simulate post-intervention temperature reductions.
 """,
     tools=[
         get_dallas_live_temperature,

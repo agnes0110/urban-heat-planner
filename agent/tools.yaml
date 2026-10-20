@@ -2,8 +2,8 @@
 # 1. Historic Data Agent tools query EXCLUSIVELY:
 #    - qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.station_daily_temps
 #    - qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_observations
-# 2. Operational Vulnerability & Tri-Agency Dispatch tools query:
-#    - qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index
+# 2. Operational Vulnerability & Tri-Agency Dispatch tools query BigQuery ML:
+#    - qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model (evaluated over v_tract_heat_features)
 
 sources:
   a4i-bigquery:
@@ -113,11 +113,11 @@ tools:
     kind: bigquery-sql
     source: a4i-bigquery
     description: >-
-      Run BigQuery ML `ML.EXPLAIN_PREDICT` on `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.predict_heat_risk_model`
+      Run BigQuery ML `ML.EXPLAIN_PREDICT` on `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model`
       for the census tract nearest to a requested (latitude, longitude) coordinate in
-      `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`,
-      returning `predicted_risk_level`, `probability`, and `top_feature_attributions`
-      alongside the tract's UVI score and heat offset.
+      `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.v_tract_heat_features`,
+      returning `predicted_heat_offset_f` and `top_feature_attributions`
+      alongside the tract's UVI score and resilience attributes.
     parameters:
       - name: lat
         type: float
@@ -128,86 +128,56 @@ tools:
     statement: |
       WITH nearest_tract AS (
         SELECT
-          u.city,
-          LPAD(CAST(u.geo_id AS STRING), 11, '0') AS geo_id,
-          u.latitude AS tract_lat,
-          u.longitude AS tract_lon,
-          @lat AS latitude,
-          @lon AS longitude,
-          ROUND(u.universal_vulnerability_index, 2) AS universal_vulnerability_index,
-          ROUND(u.observed_avg_temp, 2) AS observed_avg_temp,
-          ROUND(u.observed_avg_temp - AVG(u.observed_avg_temp) OVER (), 2) AS heat_offset_f,
-          u.heat_wave_risk_flag,
-          u.average_age,
-          u.households,
-          u.no_cars,
-          u.nearby_parks,
-          u.urban_density_status,
-          u.greenery_status,
-          u.cooling_center_type,
-          u.capacity_status,
-          u.energy_grid_status,
+          u.*,
           ST_DISTANCE(
             ST_GEOGPOINT(@lon, @lat),
-            ST_GEOGPOINT(u.longitude, u.latitude)
+            ST_GEOGPOINT(u.tract_lon, u.tract_lat)
           ) / 1000.0 AS distance_to_tract_km
-        FROM `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index` u
-        WHERE u.average_age > 0 AND u.universal_vulnerability_index >= 0
+        FROM `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.v_tract_heat_features` u
+        WHERE u.median_age > 0
+          AND u.universal_vulnerability_index >= 0
+          AND u.building_age_years BETWEEN 0 AND 250
+          AND u.surrounding_3km_bldg_age BETWEEN 0 AND 250
         ORDER BY distance_to_tract_km ASC
         LIMIT 1
       )
       SELECT *
       FROM ML.EXPLAIN_PREDICT(
-        MODEL `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.predict_heat_risk_model`,
+        MODEL `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model`,
         TABLE nearest_tract,
-        STRUCT(6 AS top_k_features)
+        STRUCT(5 AS top_k_features)
       )
 
   get_top_emergency_tracts:
     kind: bigquery-sql
     source: a4i-bigquery
     description: >-
-      Fetch the top N highest-priority census tracts in Dallas from
-      `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`
-      enriched with BigQuery ML `ML.EXPLAIN_PREDICT` (`predict_heat_risk_model`),
-      returning `predicted_risk_level`, `probability`, `top_feature_attributions`,
-      and all 4 metric groups: Geographic Identifiers, Climate & Temperature Metrics,
-      Demographics & Mobility, and Urban Environment & Resilience Infrastructure.
+      Fetch the top N highest-priority census tracts in Dallas using BigQuery ML
+      `ML.EXPLAIN_PREDICT` on `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model`
+      (over `v_tract_heat_features`), returning `predicted_heat_offset_f`,
+      `top_feature_attributions`, and all 4 metric groups: Geographic Identifiers,
+      Climate & Temperature Metrics, Demographics & Mobility, and Urban Environment
+      & Resilience Infrastructure.
     parameters:
       - name: limit_n
         type: integer
         description: Number of top tracts to return (e.g. 10).
     statement: |
       WITH top_tracts AS (
-        SELECT
-          city,
-          LPAD(CAST(geo_id AS STRING), 11, '0') AS geo_id,
-          latitude,
-          longitude,
-          ROUND(universal_vulnerability_index, 2) AS universal_vulnerability_index,
-          ROUND(observed_avg_temp, 2) AS observed_avg_temp,
-          ROUND(observed_avg_temp - AVG(observed_avg_temp) OVER (), 2) AS heat_offset_f,
-          heat_wave_risk_flag,
-          ROUND(average_age, 1) AS average_age,
-          CAST(households AS INT64) AS households,
-          CAST(no_cars AS INT64) AS no_cars,
-          ROUND(SAFE_DIVIDE(no_cars, NULLIF(households, 0)) * 100.0, 1) AS no_vehicle_rate_pct,
-          urban_density_status,
-          greenery_status,
-          nearby_parks,
-          cooling_center_type,
-          capacity_status,
-          energy_grid_status
-        FROM `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`
-        WHERE average_age > 0 AND universal_vulnerability_index >= 0
+        SELECT *
+        FROM `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.v_tract_heat_features`
+        WHERE median_age > 0
+          AND universal_vulnerability_index >= 0
+          AND building_age_years BETWEEN 0 AND 250
+          AND surrounding_3km_bldg_age BETWEEN 0 AND 250
         ORDER BY universal_vulnerability_index DESC, no_cars DESC
         LIMIT @limit_n
       )
       SELECT *
       FROM ML.EXPLAIN_PREDICT(
-        MODEL `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.predict_heat_risk_model`,
+        MODEL `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model`,
         TABLE top_tracts,
-        STRUCT(6 AS top_k_features)
+        STRUCT(5 AS top_k_features)
       )
       ORDER BY universal_vulnerability_index DESC, no_cars DESC
 
@@ -215,49 +185,42 @@ tools:
     kind: bigquery-sql
     source: a4i-bigquery
     description: >-
-      Look up a specific census tract by 11-digit GEOID in
-      `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`.
+      Look up a specific census tract by 11-digit GEOID and evaluate it with
+      `ML.EXPLAIN_PREDICT` on `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model`.
     parameters:
       - name: tract_geoid
         type: string
         description: 11-digit Census Tract GEOID (e.g. '48113020500').
     statement: |
-      SELECT
-        city,
-        LPAD(CAST(geo_id AS STRING), 11, '0') AS geo_id,
-        latitude,
-        longitude,
-        ROUND(universal_vulnerability_index, 2) AS universal_vulnerability_index,
-        ROUND(observed_avg_temp, 2) AS observed_avg_temp,
-        heat_wave_risk_flag,
-        ROUND(average_age, 1) AS average_age,
-        CAST(households AS INT64) AS households,
-        CAST(no_cars AS INT64) AS no_cars,
-        ROUND(SAFE_DIVIDE(no_cars, NULLIF(households, 0)) * 100.0, 1) AS no_vehicle_rate_pct,
-        urban_density_status,
-        greenery_status,
-        nearby_parks,
-        cooling_center_type,
-        capacity_status,
-        energy_grid_status
-      FROM `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`
-      WHERE LPAD(CAST(geo_id AS STRING), 11, '0') = LPAD(@tract_geoid, 11, '0')
+      SELECT *
+      FROM ML.EXPLAIN_PREDICT(
+        MODEL `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model`,
+        (
+          SELECT *
+          FROM `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.v_tract_heat_features`
+          WHERE LPAD(CAST(geo_id AS STRING), 11, '0') = LPAD(@tract_geoid, 11, '0')
+        ),
+        STRUCT(5 AS top_k_features)
+      )
 
   get_city_uvi_summary:
     kind: bigquery-sql
     source: a4i-bigquery
     description: >-
       Summarize city-wide climate, demographic, and infrastructure resilience
-      metrics from `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`.
+      metrics from `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model`
+      (`ML.EXPLAIN_PREDICT` over `v_tract_heat_features`).
     statement: |
       SELECT
-        ANY_VALUE(city) AS city,
+        'Dallas' AS city,
         COUNT(*) AS total_valid_tracts,
+        COUNTIF(is_measured = 1) AS measured_heat_watch_tracts,
+        COUNTIF(is_measured = 0) AS bqml_predicted_unmeasured_tracts,
         ROUND(AVG(universal_vulnerability_index), 2) AS avg_uvi,
         ROUND(MAX(universal_vulnerability_index), 2) AS max_uvi,
-        ROUND(MIN(observed_avg_temp), 2) AS min_observed_temp_f,
-        ROUND(AVG(observed_avg_temp), 2) AS avg_observed_temp_f,
-        ROUND(MAX(observed_avg_temp), 2) AS max_observed_temp_f,
+        ROUND(MIN(predicted_heat_offset_f), 2) AS min_predicted_offset_f,
+        ROUND(AVG(predicted_heat_offset_f), 2) AS avg_predicted_offset_f,
+        ROUND(MAX(predicted_heat_offset_f), 2) AS max_predicted_offset_f,
         COUNTIF(heat_wave_risk_flag = 'Highly Likely') AS highly_likely_heatwave_tracts,
         COUNTIF(greenery_status = 'Urban Heat Island - Higher Risk') AS uhi_higher_risk_tracts,
         COUNTIF(urban_density_status = 'Moderate Density') AS moderate_density_tracts,
@@ -265,37 +228,59 @@ tools:
         CAST(SUM(no_cars) AS INT64) AS total_no_car_households,
         CAST(SUM(households) AS INT64) AS total_households,
         ROUND(SAFE_DIVIDE(SUM(no_cars), NULLIF(SUM(households), 0)) * 100.0, 1) AS city_no_vehicle_rate_pct,
-        ROUND(AVG(average_age), 1) AS city_avg_age
-      FROM `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`
-      WHERE average_age > 0 AND universal_vulnerability_index >= 0
+        ROUND(AVG(median_age), 1) AS city_avg_age
+      FROM ML.EXPLAIN_PREDICT(
+        MODEL `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model`,
+        (
+          SELECT *
+          FROM `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.v_tract_heat_features`
+          WHERE median_age > 0
+            AND universal_vulnerability_index >= 0
+            AND building_age_years BETWEEN 0 AND 250
+            AND surrounding_3km_bldg_age BETWEEN 0 AND 250
+        ),
+        STRUCT(5 AS top_k_features)
+      )
 
   get_equity_audit_cohorts:
     kind: bigquery-sql
     source: a4i-bigquery
     description: >-
-      Compare Top 10 Universal Vulnerability Index tracts, Top 10 Pure Temperature
-      tracts, and the City-Wide Dallas Baseline using ONLY
-      `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`.
+      Compare Top 10 Universal Vulnerability Index tracts, Top 10 Pure Heat-Offset
+      tracts, and the City-Wide Dallas Baseline using BigQuery ML `ML.EXPLAIN_PREDICT`
+      on `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model`.
     statement: |
       WITH clean AS (
         SELECT
           LPAD(CAST(geo_id AS STRING), 11, '0') AS geo_id,
           universal_vulnerability_index,
-          observed_avg_temp,
-          average_age,
+          COALESCE(avg_temp_f, 105.32 + predicted_heat_offset_f) AS observed_avg_temp,
+          predicted_heat_offset_f,
+          median_age AS average_age,
           no_cars,
           households,
           SAFE_DIVIDE(no_cars, NULLIF(households, 0)) AS no_vehicle_rate,
           ROW_NUMBER() OVER (ORDER BY universal_vulnerability_index DESC, no_cars DESC) AS uvi_rank,
-          ROW_NUMBER() OVER (ORDER BY observed_avg_temp DESC) AS temp_rank
-        FROM `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`
-        WHERE average_age > 0 AND universal_vulnerability_index >= 0
+          ROW_NUMBER() OVER (ORDER BY predicted_heat_offset_f DESC) AS temp_rank
+        FROM ML.EXPLAIN_PREDICT(
+          MODEL `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model`,
+          (
+            SELECT *
+            FROM `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.v_tract_heat_features`
+            WHERE median_age > 0
+              AND universal_vulnerability_index >= 0
+              AND building_age_years BETWEEN 0 AND 250
+              AND surrounding_3km_bldg_age BETWEEN 0 AND 250
+          ),
+          STRUCT(5 AS top_k_features)
+        )
       )
       SELECT
         '1_top_10_uvi_priority' AS cohort,
         COUNT(*) AS num_tracts,
         ROUND(AVG(universal_vulnerability_index), 2) AS avg_uvi,
         ROUND(AVG(observed_avg_temp), 2) AS avg_observed_temp_f,
+        ROUND(AVG(predicted_heat_offset_f), 2) AS avg_predicted_offset_f,
         ROUND(AVG(no_vehicle_rate) * 100.0, 2) AS avg_no_vehicle_rate_pct,
         CAST(SUM(no_cars) AS INT64) AS total_no_car_households,
         ROUND(AVG(average_age), 1) AS avg_age
@@ -307,6 +292,7 @@ tools:
         COUNT(*) AS num_tracts,
         ROUND(AVG(universal_vulnerability_index), 2) AS avg_uvi,
         ROUND(AVG(observed_avg_temp), 2) AS avg_observed_temp_f,
+        ROUND(AVG(predicted_heat_offset_f), 2) AS avg_predicted_offset_f,
         ROUND(AVG(no_vehicle_rate) * 100.0, 2) AS avg_no_vehicle_rate_pct,
         CAST(SUM(no_cars) AS INT64) AS total_no_car_households,
         ROUND(AVG(average_age), 1) AS avg_age
@@ -318,6 +304,7 @@ tools:
         COUNT(*) AS num_tracts,
         ROUND(AVG(universal_vulnerability_index), 2) AS avg_uvi,
         ROUND(AVG(observed_avg_temp), 2) AS avg_observed_temp_f,
+        ROUND(AVG(predicted_heat_offset_f), 2) AS avg_predicted_offset_f,
         ROUND(AVG(no_vehicle_rate) * 100.0, 2) AS avg_no_vehicle_rate_pct,
         CAST(SUM(no_cars) AS INT64) AS total_no_car_households,
         ROUND(AVG(average_age), 1) AS avg_age
