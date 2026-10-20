@@ -1,5 +1,9 @@
 # MCP Toolbox for Databases configuration for Urban Heat Emergency Planner
-# Queries EXCLUSIVELY: qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index
+# 1. Historic Data Agent tools query EXCLUSIVELY:
+#    - qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.station_daily_temps
+#    - qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_observations
+# 2. Operational Vulnerability & Tri-Agency Dispatch tools query:
+#    - qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index
 
 sources:
   a4i-bigquery:
@@ -8,6 +12,103 @@ sources:
     location: US
 
 tools:
+  get_station_7yr_annual_frequency:
+    kind: bigquery-sql
+    source: a4i-bigquery
+    description: >-
+      Query 7-year annual weather station heat frequency and trends (2019–2025)
+      using EXCLUSIVELY `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.station_daily_temps`.
+    parameters:
+      - name: threshold_f
+        type: float
+        description: Daily maximum temperature threshold in °F (e.g. 100.0).
+    statement: |
+      SELECT
+        EXTRACT(YEAR FROM observation_date) AS year,
+        COUNT(DISTINCT station_id) AS active_stations,
+        COUNT(*) AS total_station_days,
+        ROUND(AVG(max_temp_f), 2) AS avg_daily_max_f,
+        ROUND(MAX(max_temp_f), 1) AS peak_max_temp_f,
+        COUNTIF(max_temp_f >= @threshold_f) AS station_days_ge_threshold,
+        ROUND(SAFE_DIVIDE(COUNTIF(max_temp_f >= @threshold_f), COUNT(DISTINCT station_id)), 1) AS avg_days_ge_threshold_per_station,
+        ROUND(SAFE_DIVIDE(COUNTIF(max_temp_f >= 95.0), COUNT(DISTINCT station_id)), 1) AS avg_days_ge_95f_per_station,
+        ROUND(SAFE_DIVIDE(COUNTIF(max_temp_f >= 100.0), COUNT(DISTINCT station_id)), 1) AS avg_days_ge_100f_per_station,
+        ROUND(SAFE_DIVIDE(COUNTIF(max_temp_f >= 102.0), COUNT(DISTINCT station_id)), 1) AS avg_days_ge_102f_per_station,
+        ROUND(SAFE_DIVIDE(COUNTIF(max_temp_f >= 105.0), COUNT(DISTINCT station_id)), 1) AS avg_days_ge_105f_per_station
+      FROM `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.station_daily_temps`
+      GROUP BY year
+      ORDER BY year ASC
+
+  get_station_7yr_by_station:
+    kind: bigquery-sql
+    source: a4i-bigquery
+    description: >-
+      Query 7-year per-station daily maximum temperature summary and threshold
+      exceedance counts across all 16 regional weather stations using EXCLUSIVELY
+      `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.station_daily_temps`.
+    parameters:
+      - name: threshold_f
+        type: float
+        description: Daily maximum temperature threshold in °F (e.g. 100.0).
+    statement: |
+      SELECT
+        station_id,
+        station_name,
+        ROUND(AVG(latitude), 5) AS latitude,
+        ROUND(AVG(longitude), 5) AS longitude,
+        COUNT(*) AS total_days_recorded,
+        CAST(MIN(observation_date) AS STRING) AS first_observation_date,
+        CAST(MAX(observation_date) AS STRING) AS last_observation_date,
+        ROUND(MIN(max_temp_f), 1) AS min_max_temp_f,
+        ROUND(AVG(max_temp_f), 2) AS avg_daily_max_f,
+        ROUND(MAX(max_temp_f), 1) AS peak_max_temp_f,
+        COUNTIF(max_temp_f >= @threshold_f) AS total_days_ge_threshold,
+        ROUND(SAFE_DIVIDE(COUNTIF(max_temp_f >= @threshold_f), COUNT(*) / 365.25), 1) AS annualized_days_ge_threshold_per_year,
+        COUNTIF(max_temp_f >= 95.0) AS total_days_ge_95f,
+        COUNTIF(max_temp_f >= 100.0) AS total_days_ge_100f,
+        COUNTIF(max_temp_f >= 102.0) AS total_days_ge_102f,
+        COUNTIF(max_temp_f >= 105.0) AS total_days_ge_105f
+      FROM `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.station_daily_temps`
+      GROUP BY station_id, station_name
+      ORDER BY total_days_ge_threshold DESC, peak_max_temp_f DESC
+
+  get_heat_observations_campaign_summary:
+    kind: bigquery-sql
+    source: a4i-bigquery
+    description: >-
+      Summarize the Dallas street-level Heat Watch traverse campaign (19,491 points)
+      using EXCLUSIVELY `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_observations`.
+    parameters:
+      - name: threshold_f
+        type: float
+        description: Street-level temperature threshold in °F (e.g. 105.0).
+    statement: |
+      WITH city_baseline AS (
+        SELECT AVG(temp_f) AS city_mean_temp_f
+        FROM `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_observations`
+      )
+      SELECT
+        ANY_VALUE(h.city) AS city,
+        COUNT(*) AS total_readings,
+        ROUND(MIN(h.latitude), 5) AS min_latitude,
+        ROUND(MAX(h.latitude), 5) AS max_latitude,
+        ROUND(MIN(h.longitude), 5) AS min_longitude,
+        ROUND(MAX(h.longitude), 5) AS max_longitude,
+        ROUND(MIN(h.temp_f), 2) AS min_temp_f,
+        ROUND(AVG(h.temp_f), 2) AS mean_temp_f,
+        ROUND(MAX(h.temp_f), 2) AS max_temp_f,
+        ROUND(MIN(h.temp_f - c.city_mean_temp_f), 2) AS min_heat_offset_vs_city_mean_f,
+        ROUND(MAX(h.temp_f - c.city_mean_temp_f), 2) AS max_heat_offset_vs_city_mean_f,
+        COUNTIF(h.temp_f >= @threshold_f) AS readings_at_or_above_threshold,
+        COUNTIF(h.temp_f >= 105.0) AS readings_ge_105f,
+        COUNTIF(h.temp_f >= 107.0) AS readings_ge_107f,
+        COUNTIF(h.temp_f >= 108.0) AS readings_ge_108f,
+        COUNTIF(h.observed_at IS NOT NULL) AS non_null_observed_at_count,
+        COUNTIF(h.heat_index_f IS NOT NULL) AS non_null_heat_index_f_count,
+        COUNTIF(h.humidity_pct IS NOT NULL) AS non_null_humidity_pct_count
+      FROM `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_observations` h
+      CROSS JOIN city_baseline c
+
   get_top_emergency_tracts:
     kind: bigquery-sql
     source: a4i-bigquery

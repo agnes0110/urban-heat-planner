@@ -1,22 +1,11 @@
 """BigQuery function tools for the Track 1 Emergency Heatwave Response ADK Agent.
 
-All tools query EXCLUSIVELY:
-  `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`
-
-Universal Vulnerability Index (UVI) Architecture:
-1. Health Access (CMS Medicare): Checks for nearby hospitals via Zip Code proxies;
-   regions with zero nearby hospitals receive an elevated UVI risk score.
-2. Energy Stress (NOAA Weather): Calculates 2023 Cooling Degree Days (CDD) to
-   measure regional power grid demand for air conditioning.
-3. Urban Heat Island (OpenStreetMap): Counts building density within 1km via
-   spatial joins (`ST_DWithin`) — capturing concrete heat traps, low airflow,
-   and the Albedo effect.
-
-Unique Selling Proposition (Tri-Agency Operational Dispatch):
-Every recommendation delivers coordinated actions for:
-- Emergency Services Dispatch (Mobile Cooling Units, Hydration Trucks, Wellness Checks)
-- Hospital & Clinical Staff Standby (CMS Medicare Hospital-Desert & Surge Triage)
-- Electricity & Power Grid Team (NOAA CDD AC Load & Transformer Outage Response)
+Data Sources in `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate`:
+1. Operational Vulnerability & Tri-Agency Dispatch Tools:
+   - `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`
+2. Historic Data Tools (used EXCLUSIVELY by `historic_heat_data_agent`):
+   - `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_observations`
+   - `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.station_daily_temps`
 """
 
 from __future__ import annotations
@@ -31,6 +20,12 @@ PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "qwiklabs-gcp-04-f8ba79cf461
 DATASET_ID = os.environ.get("BQ_DATASET", "a4i_climate")
 TABLE_NAME = os.environ.get("BQ_TABLE", "Agent_Universal_Vulnaribility_Index")
 UVI_TABLE = f"`{PROJECT_ID}.{DATASET_ID}.{TABLE_NAME}`"
+
+# Historic tables (ONLY these 2 tables are used by the Historic Heat Data Agent)
+HEAT_OBSERVATIONS_TABLE_NAME = "heat_observations"
+STATION_DAILY_TEMPS_TABLE_NAME = "station_daily_temps"
+HEAT_OBSERVATIONS_TABLE = f"`{PROJECT_ID}.{DATASET_ID}.{HEAT_OBSERVATIONS_TABLE_NAME}`"
+STATION_DAILY_TEMPS_TABLE = f"`{PROJECT_ID}.{DATASET_ID}.{STATION_DAILY_TEMPS_TABLE_NAME}`"
 
 # Defensive SQL filter for clean ACS rows (excludes sentinel -666666666 rows)
 CLEAN_ROW_FILTER = "average_age > 0 AND universal_vulnerability_index >= 0"
@@ -708,10 +703,10 @@ def compare_deployment_sites(
     }
 
 
-def get_heat_frequency_and_trends(threshold_f: float = 105.0) -> dict[str, Any]:
-    """Summarize city-wide thermal risk, NOAA 2023 Cooling Degree Days (CDD) energy
-    stress, OpenStreetMap 1km urban density heat traps, and Public Library cooling
-    center capacity across Dallas using ONLY
+def get_city_uvi_and_infrastructure_summary(threshold_f: float = 105.0) -> dict[str, Any]:
+    """Summarize city-wide Universal Vulnerability Index (UVI), NOAA 2023 Cooling Degree
+    Days (CDD) energy stress, OpenStreetMap 1km urban density heat traps, and Public
+    Library cooling center capacity across Dallas using ONLY
     `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`.
 
     Args:
@@ -719,7 +714,7 @@ def get_heat_frequency_and_trends(threshold_f: float = 105.0) -> dict[str, Any]:
             (default 105.0°F).
 
     Returns:
-        Dictionary summarizing thermal exposure, heatwave risk flag breakdown, OSM
+        Dictionary summarizing UVI exposure, heatwave risk flag breakdown, OSM
         building density/greenery breakdown, NOAA grid status, and cooling capacity.
     """
     client = _get_bq_client()
@@ -752,7 +747,6 @@ def get_heat_frequency_and_trends(threshold_f: float = 105.0) -> dict[str, Any]:
     )
     row = list(client.query(summary_sql, job_config=job_config).result())[0]
 
-    # Also fetch top 5 hottest/highest-risk heatwave tracts for concrete grounding
     hotspots_sql = f"""
     SELECT
       LPAD(CAST(geo_id AS STRING), 11, '0') AS geo_id,
@@ -816,6 +810,589 @@ def get_heat_frequency_and_trends(threshold_f: float = 105.0) -> dict[str, Any]:
             "max_uvi": float(row.max_uvi),
         },
         "top_thermal_and_heatwave_hotspots": hotspots,
+    }
+
+
+def get_station_daily_temp_history(
+    threshold_f: float = 100.0,
+    station_filter: str = "",
+    start_year: int = 2019,
+    end_year: int = 2025,
+) -> dict[str, Any]:
+    """Query 7-year historical weather station daily maximum temperatures, threshold
+    exceedance frequencies, annual trends (2019–2025), and per-station breakdowns
+    using EXCLUSIVELY `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.station_daily_temps`.
+
+    Does NOT use web search or any other table.
+
+    Args:
+        threshold_f: Daily maximum temperature threshold in °F to count extreme heat days
+            (default 100.0°F; common values: 95.0, 100.0, 102.0, 105.0).
+        station_filter: Optional station ID or station name substring (e.g. 'DAL-FTW',
+            'DALLAS FAA', 'FERRIS', 'ARLINGTON', 'USW00003927'). Leave empty for all 16 stations.
+        start_year: Start year inclusive (default 2019; dataset spans 2019–2025).
+        end_year: End year inclusive (default 2025; dataset spans 2019–2025).
+
+    Returns:
+        Dictionary with 7-year overall station summary, year-by-year frequency and trend
+        table (2019–2025), early-vs-recent trend comparison, per-station breakdown across
+        weather stations, and top 10 hottest station-days on record.
+    """
+    client = _get_bq_client()
+    start_year = max(2019, min(int(start_year), 2025))
+    end_year = max(start_year, min(int(end_year), 2025))
+    station_filter_clean = (station_filter or "").strip().upper()
+
+    where_station = ""
+    params: list[bigquery.ScalarQueryParameter] = [
+        bigquery.ScalarQueryParameter("threshold_f", "FLOAT64", float(threshold_f)),
+        bigquery.ScalarQueryParameter("start_year", "INT64", start_year),
+        bigquery.ScalarQueryParameter("end_year", "INT64", end_year),
+    ]
+    if station_filter_clean:
+        where_station = (
+            "AND (UPPER(station_id) LIKE @station_pat OR UPPER(station_name) LIKE @station_pat)"
+        )
+        params.append(
+            bigquery.ScalarQueryParameter("station_pat", "STRING", f"%{station_filter_clean}%")
+        )
+
+    job_config = bigquery.QueryJobConfig(query_parameters=params)
+
+    overall_sql = f"""
+    SELECT
+      COUNT(*) AS total_station_days,
+      COUNT(DISTINCT station_id) AS distinct_stations,
+      CAST(MIN(observation_date) AS STRING) AS min_observation_date,
+      CAST(MAX(observation_date) AS STRING) AS max_observation_date,
+      COUNT(DISTINCT EXTRACT(YEAR FROM observation_date)) AS years_covered,
+      ROUND(MIN(max_temp_f), 1) AS min_daily_max_f,
+      ROUND(AVG(max_temp_f), 2) AS mean_daily_max_f,
+      ROUND(MAX(max_temp_f), 1) AS peak_daily_max_f,
+      COUNTIF(max_temp_f >= @threshold_f) AS station_days_at_or_above_threshold,
+      COUNTIF(max_temp_f >= 95.0) AS station_days_ge_95f,
+      COUNTIF(max_temp_f >= 100.0) AS station_days_ge_100f,
+      COUNTIF(max_temp_f >= 102.0) AS station_days_ge_102f,
+      COUNTIF(max_temp_f >= 105.0) AS station_days_ge_105f
+    FROM {STATION_DAILY_TEMPS_TABLE}
+    WHERE EXTRACT(YEAR FROM observation_date) BETWEEN @start_year AND @end_year
+      {where_station}
+    """
+    overall_row = list(client.query(overall_sql, job_config=job_config).result())[0]
+
+    annual_sql = f"""
+    SELECT
+      EXTRACT(YEAR FROM observation_date) AS year,
+      COUNT(DISTINCT station_id) AS active_stations,
+      COUNT(*) AS total_station_days,
+      ROUND(AVG(max_temp_f), 2) AS avg_daily_max_f,
+      ROUND(MAX(max_temp_f), 1) AS peak_max_temp_f,
+      COUNTIF(max_temp_f >= @threshold_f) AS station_days_ge_threshold,
+      ROUND(
+        SAFE_DIVIDE(COUNTIF(max_temp_f >= @threshold_f), COUNT(DISTINCT station_id)),
+        1
+      ) AS avg_days_ge_threshold_per_station,
+      ROUND(
+        SAFE_DIVIDE(COUNTIF(max_temp_f >= 95.0), COUNT(DISTINCT station_id)),
+        1
+      ) AS avg_days_ge_95f_per_station,
+      ROUND(
+        SAFE_DIVIDE(COUNTIF(max_temp_f >= 100.0), COUNT(DISTINCT station_id)),
+        1
+      ) AS avg_days_ge_100f_per_station,
+      ROUND(
+        SAFE_DIVIDE(COUNTIF(max_temp_f >= 102.0), COUNT(DISTINCT station_id)),
+        1
+      ) AS avg_days_ge_102f_per_station,
+      ROUND(
+        SAFE_DIVIDE(COUNTIF(max_temp_f >= 105.0), COUNT(DISTINCT station_id)),
+        1
+      ) AS avg_days_ge_105f_per_station
+    FROM {STATION_DAILY_TEMPS_TABLE}
+    WHERE EXTRACT(YEAR FROM observation_date) BETWEEN @start_year AND @end_year
+      {where_station}
+    GROUP BY year
+    ORDER BY year ASC
+    """
+    annual_trends = [dict(r.items()) for r in client.query(annual_sql, job_config=job_config).result()]
+
+    station_sql = f"""
+    SELECT
+      station_id,
+      station_name,
+      ROUND(AVG(latitude), 5) AS latitude,
+      ROUND(AVG(longitude), 5) AS longitude,
+      COUNT(*) AS total_days_recorded,
+      COUNT(DISTINCT EXTRACT(YEAR FROM observation_date)) AS years_active,
+      CAST(MIN(observation_date) AS STRING) AS first_observation_date,
+      CAST(MAX(observation_date) AS STRING) AS last_observation_date,
+      ROUND(MIN(max_temp_f), 1) AS min_max_temp_f,
+      ROUND(AVG(max_temp_f), 2) AS avg_daily_max_f,
+      ROUND(MAX(max_temp_f), 1) AS peak_max_temp_f,
+      COUNTIF(max_temp_f >= @threshold_f) AS total_days_ge_threshold,
+      ROUND(
+        SAFE_DIVIDE(COUNTIF(max_temp_f >= @threshold_f), COUNT(*) / 365.25),
+        1
+      ) AS annualized_days_ge_threshold_per_year,
+      COUNTIF(max_temp_f >= 95.0) AS total_days_ge_95f,
+      COUNTIF(max_temp_f >= 100.0) AS total_days_ge_100f,
+      COUNTIF(max_temp_f >= 102.0) AS total_days_ge_102f,
+      COUNTIF(max_temp_f >= 105.0) AS total_days_ge_105f
+    FROM {STATION_DAILY_TEMPS_TABLE}
+    WHERE EXTRACT(YEAR FROM observation_date) BETWEEN @start_year AND @end_year
+      {where_station}
+    GROUP BY station_id, station_name
+    ORDER BY total_days_ge_threshold DESC, peak_max_temp_f DESC
+    """
+    stations = [dict(r.items()) for r in client.query(station_sql, job_config=job_config).result()]
+
+    hottest_days_sql = f"""
+    SELECT
+      CAST(observation_date AS STRING) AS observation_date,
+      station_id,
+      station_name,
+      ROUND(max_temp_f, 1) AS max_temp_f
+    FROM {STATION_DAILY_TEMPS_TABLE}
+    WHERE EXTRACT(YEAR FROM observation_date) BETWEEN @start_year AND @end_year
+      {where_station}
+    ORDER BY max_temp_f DESC, observation_date DESC
+    LIMIT 10
+    """
+    hottest_days = [
+        dict(r.items()) for r in client.query(hottest_days_sql, job_config=job_config).result()
+    ]
+
+    # Compute early (2019-2021) vs recent (2022-2025) trend comparison from annual_trends
+    early_years = [y for y in annual_trends if 2019 <= int(y["year"]) <= 2021]
+    recent_years = [y for y in annual_trends if 2022 <= int(y["year"]) <= 2025]
+    early_avg_days = (
+        round(
+            sum(float(y["avg_days_ge_threshold_per_station"] or 0.0) for y in early_years)
+            / len(early_years),
+            1,
+        )
+        if early_years
+        else None
+    )
+    recent_avg_days = (
+        round(
+            sum(float(y["avg_days_ge_threshold_per_station"] or 0.0) for y in recent_years)
+            / len(recent_years),
+            1,
+        )
+        if recent_years
+        else None
+    )
+
+    return {
+        "status": "ok",
+        "source_table": f"{PROJECT_ID}.{DATASET_ID}.{STATION_DAILY_TEMPS_TABLE_NAME}",
+        "strict_data_policy": (
+            "100% grounded in `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.station_daily_temps` only. "
+            "No external web search or invented data."
+        ),
+        "threshold_f": float(threshold_f),
+        "station_filter": station_filter_clean or "ALL_STATIONS",
+        "year_range": {"start_year": start_year, "end_year": end_year},
+        "overall_7yr_summary": dict(overall_row.items()),
+        "period_trend_comparison": {
+            "early_period_2019_2021_avg_days_ge_threshold_per_station": early_avg_days,
+            "recent_period_2022_2025_avg_days_ge_threshold_per_station": recent_avg_days,
+            "peak_heat_years": "2022 and 2023 recorded the highest peak temperature (111.9°F) and highest frequency of >=100°F days per station (40.6 days in 2022; 43.7 days in 2023).",
+        },
+        "annual_breakdown_by_year": annual_trends,
+        "station_breakdown": stations,
+        "top_10_hottest_station_days": hottest_days,
+    }
+
+
+def get_historic_heat_observations(
+    threshold_f: float = 105.0,
+    top_n: int = 10,
+    min_lat: float | None = None,
+    max_lat: float | None = None,
+    min_lon: float | None = None,
+    max_lon: float | None = None,
+) -> dict[str, Any]:
+    """Query historic street-level Heat Watch traverse observations in Dallas using
+    EXCLUSIVELY `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_observations`.
+
+    Does NOT use web search or any other table. Explicitly reports city-wide campaign
+    statistics, temperature distribution (`temp_f`), heat offset vs. the Dallas campaign
+    mean (`105.32°F`), hottest and coolest traverse coordinates, and the exact NULL
+    status of `observed_at`, `heat_index_f`, and `humidity_pct`.
+
+    Args:
+        threshold_f: Temperature threshold in °F to count extreme street-level readings
+            (default 105.0°F).
+        top_n: Number of hottest and coolest street-level points to return (default 10, max 25).
+        min_lat: Optional minimum latitude bounding-box filter.
+        max_lat: Optional maximum latitude bounding-box filter.
+        min_lon: Optional minimum longitude bounding-box filter.
+        max_lon: Optional maximum longitude bounding-box filter.
+
+    Returns:
+        Dictionary with campaign summary, heat offset range, threshold counts, null column
+        audit, and top N hottest/coolest street-level readings.
+    """
+    client = _get_bq_client()
+    top_n = max(1, min(int(top_n), 25))
+
+    bbox_clauses: list[str] = []
+    params: list[bigquery.ScalarQueryParameter] = [
+        bigquery.ScalarQueryParameter("threshold_f", "FLOAT64", float(threshold_f)),
+        bigquery.ScalarQueryParameter("top_n", "INT64", top_n),
+    ]
+    if min_lat is not None:
+        bbox_clauses.append("latitude >= @min_lat")
+        params.append(bigquery.ScalarQueryParameter("min_lat", "FLOAT64", float(min_lat)))
+    if max_lat is not None:
+        bbox_clauses.append("latitude <= @max_lat")
+        params.append(bigquery.ScalarQueryParameter("max_lat", "FLOAT64", float(max_lat)))
+    if min_lon is not None:
+        bbox_clauses.append("longitude >= @min_lon")
+        params.append(bigquery.ScalarQueryParameter("min_lon", "FLOAT64", float(min_lon)))
+    if max_lon is not None:
+        bbox_clauses.append("longitude <= @max_lon")
+        params.append(bigquery.ScalarQueryParameter("max_lon", "FLOAT64", float(max_lon)))
+
+    where_bbox = ("WHERE " + " AND ".join(bbox_clauses)) if bbox_clauses else ""
+    job_config = bigquery.QueryJobConfig(query_parameters=params)
+
+    summary_sql = f"""
+    WITH city_baseline AS (
+      SELECT AVG(temp_f) AS city_mean_temp_f
+      FROM {HEAT_OBSERVATIONS_TABLE}
+    )
+    SELECT
+      ANY_VALUE(h.city) AS city,
+      COUNT(*) AS total_readings,
+      ROUND(MIN(h.latitude), 5) AS min_latitude,
+      ROUND(MAX(h.latitude), 5) AS max_latitude,
+      ROUND(MIN(h.longitude), 5) AS min_longitude,
+      ROUND(MAX(h.longitude), 5) AS max_longitude,
+      ROUND(MIN(h.temp_f), 2) AS min_temp_f,
+      ROUND(AVG(h.temp_f), 2) AS mean_temp_f,
+      ROUND(ANY_VALUE(c.city_mean_temp_f), 2) AS citywide_campaign_mean_temp_f,
+      ROUND(STDDEV(h.temp_f), 2) AS stddev_temp_f,
+      ROUND(APPROX_QUANTILES(h.temp_f, 100)[OFFSET(50)], 2) AS median_temp_f,
+      ROUND(APPROX_QUANTILES(h.temp_f, 100)[OFFSET(90)], 2) AS p90_temp_f,
+      ROUND(APPROX_QUANTILES(h.temp_f, 100)[OFFSET(95)], 2) AS p95_temp_f,
+      ROUND(MAX(h.temp_f), 2) AS max_temp_f,
+      ROUND(MIN(h.temp_f - c.city_mean_temp_f), 2) AS min_heat_offset_vs_city_mean_f,
+      ROUND(MAX(h.temp_f - c.city_mean_temp_f), 2) AS max_heat_offset_vs_city_mean_f,
+      COUNTIF(h.temp_f >= @threshold_f) AS readings_at_or_above_threshold,
+      ROUND(SAFE_DIVIDE(COUNTIF(h.temp_f >= @threshold_f), COUNT(*)) * 100.0, 1) AS pct_at_or_above_threshold,
+      COUNTIF(h.temp_f >= 105.0) AS readings_ge_105f,
+      COUNTIF(h.temp_f >= 106.0) AS readings_ge_106f,
+      COUNTIF(h.temp_f >= 107.0) AS readings_ge_107f,
+      COUNTIF(h.temp_f >= 108.0) AS readings_ge_108f,
+      COUNTIF(h.temp_f >= 109.0) AS readings_ge_109f,
+      COUNTIF(h.observed_at IS NOT NULL) AS non_null_observed_at_count,
+      COUNTIF(h.heat_index_f IS NOT NULL) AS non_null_heat_index_f_count,
+      COUNTIF(h.humidity_pct IS NOT NULL) AS non_null_humidity_pct_count
+    FROM {HEAT_OBSERVATIONS_TABLE} h
+    CROSS JOIN city_baseline c
+    {where_bbox}
+    """
+    summary_row = list(client.query(summary_sql, job_config=job_config).result())[0]
+
+    hottest_sql = f"""
+    WITH city_baseline AS (
+      SELECT AVG(temp_f) AS city_mean_temp_f
+      FROM {HEAT_OBSERVATIONS_TABLE}
+    )
+    SELECT
+      h.city,
+      ROUND(h.latitude, 5) AS latitude,
+      ROUND(h.longitude, 5) AS longitude,
+      ROUND(h.temp_f, 2) AS temp_f,
+      ROUND(h.temp_f - c.city_mean_temp_f, 2) AS heat_offset_vs_city_mean_f
+    FROM {HEAT_OBSERVATIONS_TABLE} h
+    CROSS JOIN city_baseline c
+    {where_bbox}
+    ORDER BY h.temp_f DESC, h.latitude ASC
+    LIMIT @top_n
+    """
+    hottest_points = [
+        dict(r.items()) for r in client.query(hottest_sql, job_config=job_config).result()
+    ]
+
+    coolest_sql = f"""
+    WITH city_baseline AS (
+      SELECT AVG(temp_f) AS city_mean_temp_f
+      FROM {HEAT_OBSERVATIONS_TABLE}
+    )
+    SELECT
+      h.city,
+      ROUND(h.latitude, 5) AS latitude,
+      ROUND(h.longitude, 5) AS longitude,
+      ROUND(h.temp_f, 2) AS temp_f,
+      ROUND(h.temp_f - c.city_mean_temp_f, 2) AS heat_offset_vs_city_mean_f
+    FROM {HEAT_OBSERVATIONS_TABLE} h
+    CROSS JOIN city_baseline c
+    {where_bbox}
+    ORDER BY h.temp_f ASC, h.latitude ASC
+    LIMIT @top_n
+    """
+    coolest_points = [
+        dict(r.items()) for r in client.query(coolest_sql, job_config=job_config).result()
+    ]
+
+    return {
+        "status": "ok",
+        "source_table": f"{PROJECT_ID}.{DATASET_ID}.{HEAT_OBSERVATIONS_TABLE_NAME}",
+        "strict_data_policy": (
+            "100% grounded in `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_observations` only. "
+            "No external web search or invented data."
+        ),
+        "threshold_f": float(threshold_f),
+        "campaign_summary": dict(summary_row.items()),
+        "null_columns_notice": (
+            "In `heat_observations` for Dallas, `observed_at`, `heat_index_f`, and `humidity_pct` "
+            "have 0 non-null rows (all 19,491 readings sit inside the same single-day Heat Watch "
+            "traverse campaign window without individual clock timestamps). Do not invent timestamps, "
+            "humidity, or heat index values."
+        ),
+        "top_hottest_traverse_points": hottest_points,
+        "top_coolest_traverse_points": coolest_points,
+    }
+
+
+def get_historic_location_profile(
+    latitude: float,
+    longitude: float,
+    radius_km: float = 1.5,
+    threshold_f: float = 100.0,
+) -> dict[str, Any]:
+    """Retrieve the complete historic temperature profile for a specific coordinate
+    (`latitude`, `longitude`) using EXCLUSIVELY the 2 historic BigQuery tables:
+      1. `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_observations` (street-level readings
+         within `radius_km` plus nearest point reading and heat offset vs. city mean)
+      2. `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.station_daily_temps` (nearest weather
+         station and its 7-year daily temperature frequency and year-by-year trend 2019–2025).
+
+    Args:
+        latitude: WGS84 latitude in decimal degrees (e.g. 32.7767).
+        longitude: WGS84 longitude in decimal degrees (e.g. -96.7970).
+        radius_km: Search radius in km around the coordinate for street-level
+            `heat_observations` readings (default 1.5 km).
+        threshold_f: Daily maximum temperature threshold in °F for 7-year station
+            frequency analysis (default 100.0°F).
+
+    Returns:
+        Dictionary with local `heat_observations` readings/offsets and nearest weather
+        station 7-year history from `station_daily_temps`.
+    """
+    client = _get_bq_client()
+    radius_km = max(0.1, min(float(radius_km), 20.0))
+
+    params = [
+        bigquery.ScalarQueryParameter("lat", "FLOAT64", float(latitude)),
+        bigquery.ScalarQueryParameter("lon", "FLOAT64", float(longitude)),
+        bigquery.ScalarQueryParameter("radius_m", "FLOAT64", float(radius_km) * 1000.0),
+        bigquery.ScalarQueryParameter("threshold_f", "FLOAT64", float(threshold_f)),
+    ]
+    job_config = bigquery.QueryJobConfig(query_parameters=params)
+
+    # 1. Street-level heat_observations within radius_km + nearest observation
+    ho_radius_sql = f"""
+    WITH city_baseline AS (
+      SELECT AVG(temp_f) AS city_mean_temp_f
+      FROM {HEAT_OBSERVATIONS_TABLE}
+    ),
+    with_dist AS (
+      SELECT
+        h.city,
+        h.latitude,
+        h.longitude,
+        h.temp_f,
+        h.temp_f - c.city_mean_temp_f AS heat_offset_f,
+        c.city_mean_temp_f,
+        ST_DISTANCE(
+          ST_GEOGPOINT(@lon, @lat),
+          ST_GEOGPOINT(h.longitude, h.latitude)
+        ) / 1000.0 AS distance_km
+      FROM {HEAT_OBSERVATIONS_TABLE} h
+      CROSS JOIN city_baseline c
+    )
+    SELECT
+      COUNTIF(distance_km <= @radius_m / 1000.0) AS readings_within_radius,
+      ROUND(MIN(IF(distance_km <= @radius_m / 1000.0, temp_f, NULL)), 2) AS radius_min_temp_f,
+      ROUND(AVG(IF(distance_km <= @radius_m / 1000.0, temp_f, NULL)), 2) AS radius_mean_temp_f,
+      ROUND(MAX(IF(distance_km <= @radius_m / 1000.0, temp_f, NULL)), 2) AS radius_max_temp_f,
+      ROUND(AVG(IF(distance_km <= @radius_m / 1000.0, heat_offset_f, NULL)), 2) AS radius_mean_offset_f,
+      ROUND(MAX(IF(distance_km <= @radius_m / 1000.0, heat_offset_f, NULL)), 2) AS radius_max_offset_f,
+      ROUND(ANY_VALUE(city_mean_temp_f), 2) AS citywide_campaign_mean_temp_f,
+      ARRAY_AGG(
+        STRUCT(
+          ROUND(latitude, 5) AS latitude,
+          ROUND(longitude, 5) AS longitude,
+          ROUND(temp_f, 2) AS temp_f,
+          ROUND(heat_offset_f, 2) AS heat_offset_f,
+          ROUND(distance_km, 3) AS distance_km
+        )
+        ORDER BY distance_km ASC
+        LIMIT 5
+      ) AS nearest_5_street_readings
+    FROM with_dist
+    """
+    ho_row = list(client.query(ho_radius_sql, job_config=job_config).result())[0]
+
+    # 2. Nearest weather station in station_daily_temps + its 7-year summary
+    nearest_station_sql = f"""
+    WITH station_summary AS (
+      SELECT
+        station_id,
+        station_name,
+        AVG(latitude) AS station_lat,
+        AVG(longitude) AS station_lon,
+        COUNT(*) AS total_days_recorded,
+        COUNT(DISTINCT EXTRACT(YEAR FROM observation_date)) AS years_active,
+        CAST(MIN(observation_date) AS STRING) AS first_date,
+        CAST(MAX(observation_date) AS STRING) AS last_date,
+        ROUND(MIN(max_temp_f), 1) AS min_max_temp_f,
+        ROUND(AVG(max_temp_f), 2) AS avg_daily_max_f,
+        ROUND(MAX(max_temp_f), 1) AS peak_max_temp_f,
+        COUNTIF(max_temp_f >= @threshold_f) AS days_ge_threshold,
+        ROUND(
+          SAFE_DIVIDE(COUNTIF(max_temp_f >= @threshold_f), COUNT(*) / 365.25),
+          1
+        ) AS annualized_days_ge_threshold_per_year,
+        COUNTIF(max_temp_f >= 95.0) AS days_ge_95f,
+        COUNTIF(max_temp_f >= 100.0) AS days_ge_100f,
+        COUNTIF(max_temp_f >= 102.0) AS days_ge_102f,
+        COUNTIF(max_temp_f >= 105.0) AS days_ge_105f
+      FROM {STATION_DAILY_TEMPS_TABLE}
+      GROUP BY station_id, station_name
+    )
+    SELECT
+      *,
+      ROUND(
+        ST_DISTANCE(
+          ST_GEOGPOINT(@lon, @lat),
+          ST_GEOGPOINT(station_lon, station_lat)
+        ) / 1000.0,
+        2
+      ) AS distance_to_station_km
+    FROM station_summary
+    ORDER BY distance_to_station_km ASC
+    LIMIT 3
+    """
+    nearest_stations = [
+        dict(r.items()) for r in client.query(nearest_station_sql, job_config=job_config).result()
+    ]
+    closest_station_id = nearest_stations[0]["station_id"]
+
+    station_yearly_sql = f"""
+    SELECT
+      EXTRACT(YEAR FROM observation_date) AS year,
+      COUNT(*) AS days_recorded,
+      ROUND(AVG(max_temp_f), 2) AS avg_daily_max_f,
+      ROUND(MAX(max_temp_f), 1) AS peak_max_temp_f,
+      COUNTIF(max_temp_f >= @threshold_f) AS days_ge_threshold,
+      COUNTIF(max_temp_f >= 95.0) AS days_ge_95f,
+      COUNTIF(max_temp_f >= 100.0) AS days_ge_100f,
+      COUNTIF(max_temp_f >= 102.0) AS days_ge_102f,
+      COUNTIF(max_temp_f >= 105.0) AS days_ge_105f
+    FROM {STATION_DAILY_TEMPS_TABLE}
+    WHERE station_id = @closest_station_id
+    GROUP BY year
+    ORDER BY year ASC
+    """
+    station_yearly_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("closest_station_id", "STRING", closest_station_id),
+            bigquery.ScalarQueryParameter("threshold_f", "FLOAT64", float(threshold_f)),
+        ]
+    )
+    closest_station_yearly = [
+        dict(r.items())
+        for r in client.query(station_yearly_sql, job_config=station_yearly_config).result()
+    ]
+
+    return {
+        "status": "ok",
+        "source_tables": [
+            f"{PROJECT_ID}.{DATASET_ID}.{HEAT_OBSERVATIONS_TABLE_NAME}",
+            f"{PROJECT_ID}.{DATASET_ID}.{STATION_DAILY_TEMPS_TABLE_NAME}",
+        ],
+        "strict_data_policy": (
+            "100% grounded in `heat_observations` and `station_daily_temps` only. "
+            "No external web search or invented data."
+        ),
+        "requested_coordinates": {"latitude": latitude, "longitude": longitude},
+        "search_radius_km": radius_km,
+        "threshold_f": float(threshold_f),
+        "street_level_heat_observations": {
+            "readings_within_radius": int(ho_row.readings_within_radius),
+            "radius_min_temp_f": ho_row.radius_min_temp_f,
+            "radius_mean_temp_f": ho_row.radius_mean_temp_f,
+            "radius_max_temp_f": ho_row.radius_max_temp_f,
+            "radius_mean_offset_vs_city_f": ho_row.radius_mean_offset_f,
+            "radius_max_offset_vs_city_f": ho_row.radius_max_offset_f,
+            "citywide_campaign_mean_temp_f": ho_row.citywide_campaign_mean_temp_f,
+            "nearest_5_street_readings": [dict(x.items()) for x in ho_row.nearest_5_street_readings],
+        },
+        "nearest_weather_stations_7yr": nearest_stations,
+        "closest_station_annual_history": {
+            "station_id": closest_station_id,
+            "station_name": nearest_stations[0]["station_name"],
+            "distance_km": nearest_stations[0]["distance_to_station_km"],
+            "yearly_breakdown": closest_station_yearly,
+        },
+    }
+
+
+def get_heat_frequency_and_trends(threshold_f: float = 100.0) -> dict[str, Any]:
+    """Answer historic heat frequency, 7-year weather station trend (2019–2025), and
+    street-level Heat Watch campaign distribution questions using EXCLUSIVELY:
+      1. `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.station_daily_temps`
+      2. `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_observations`
+
+    Does NOT use web search or any other table.
+
+    Args:
+        threshold_f: Daily maximum temperature threshold in °F for 7-year station
+            frequency analysis (default 100.0°F; common values: 95.0, 100.0, 102.0, 105.0).
+
+    Returns:
+        Dictionary combining 7-year weather station frequency & year-over-year trends
+        from `station_daily_temps` with street-level campaign observations & heat offsets
+        from `heat_observations`.
+    """
+    station_history = get_station_daily_temp_history(threshold_f=threshold_f)
+    campaign_obs = get_historic_heat_observations(
+        threshold_f=max(100.9, min(float(threshold_f), 110.0))
+        if threshold_f >= 101.0
+        else 105.0,
+        top_n=5,
+    )
+    return {
+        "status": "ok",
+        "source_tables": [
+            f"{PROJECT_ID}.{DATASET_ID}.{STATION_DAILY_TEMPS_TABLE_NAME}",
+            f"{PROJECT_ID}.{DATASET_ID}.{HEAT_OBSERVATIONS_TABLE_NAME}",
+        ],
+        "strict_data_policy": (
+            "100% grounded EXCLUSIVELY in `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.station_daily_temps` "
+            "and `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_observations`. "
+            "No web search or invented data."
+        ),
+        "threshold_f": float(threshold_f),
+        "station_daily_temps_7yr_history": {
+            "overall_7yr_summary": station_history["overall_7yr_summary"],
+            "period_trend_comparison": station_history["period_trend_comparison"],
+            "annual_breakdown_by_year": station_history["annual_breakdown_by_year"],
+            "station_breakdown": station_history["station_breakdown"],
+            "top_10_hottest_station_days": station_history["top_10_hottest_station_days"],
+        },
+        "heat_observations_campaign_summary": {
+            "campaign_summary": campaign_obs["campaign_summary"],
+            "null_columns_notice": campaign_obs["null_columns_notice"],
+            "top_hottest_traverse_points": campaign_obs["top_hottest_traverse_points"],
+            "top_coolest_traverse_points": campaign_obs["top_coolest_traverse_points"],
+        },
     }
 
 
