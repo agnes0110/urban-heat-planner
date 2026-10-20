@@ -1,0 +1,163 @@
+# MCP Toolbox for Databases configuration for Urban Heat Emergency Planner
+# Queries EXCLUSIVELY: qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index
+
+sources:
+  a4i-bigquery:
+    kind: bigquery
+    project: qwiklabs-gcp-04-f8ba79cf4618
+    location: US
+
+tools:
+  get_top_emergency_tracts:
+    kind: bigquery-sql
+    source: a4i-bigquery
+    description: >-
+      Fetch the top N highest-priority census tracts in Dallas from
+      `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`,
+      returning all 4 metric groups: Geographic Identifiers (geo_id, city, latitude,
+      longitude), Climate & Temperature Metrics (observed_avg_temp, heat_wave_risk_flag,
+      universal_vulnerability_index), Demographics & Mobility (average_age, households,
+      no_cars), and Urban Environment & Resilience Infrastructure (urban_density_status,
+      greenery_status, nearby_parks, cooling_center_type, capacity_status,
+      energy_grid_status).
+    parameters:
+      - name: limit_n
+        type: integer
+        description: Number of top tracts to return (e.g. 10).
+    statement: |
+      SELECT
+        city,
+        LPAD(CAST(geo_id AS STRING), 11, '0') AS geo_id,
+        latitude,
+        longitude,
+        ROUND(universal_vulnerability_index, 2) AS universal_vulnerability_index,
+        ROUND(observed_avg_temp, 2) AS observed_avg_temp,
+        ROUND(observed_avg_temp - AVG(observed_avg_temp) OVER (), 2) AS heat_offset_f,
+        heat_wave_risk_flag,
+        ROUND(average_age, 1) AS average_age,
+        CAST(households AS INT64) AS households,
+        CAST(no_cars AS INT64) AS no_cars,
+        ROUND(SAFE_DIVIDE(no_cars, NULLIF(households, 0)) * 100.0, 1) AS no_vehicle_rate_pct,
+        urban_density_status,
+        greenery_status,
+        nearby_parks,
+        cooling_center_type,
+        capacity_status,
+        energy_grid_status
+      FROM `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`
+      WHERE average_age > 0 AND universal_vulnerability_index >= 0
+      ORDER BY universal_vulnerability_index DESC, no_cars DESC
+      LIMIT @limit_n
+
+  get_tract_by_geoid:
+    kind: bigquery-sql
+    source: a4i-bigquery
+    description: >-
+      Look up a specific census tract by 11-digit GEOID in
+      `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`.
+    parameters:
+      - name: tract_geoid
+        type: string
+        description: 11-digit Census Tract GEOID (e.g. '48113020500').
+    statement: |
+      SELECT
+        city,
+        LPAD(CAST(geo_id AS STRING), 11, '0') AS geo_id,
+        latitude,
+        longitude,
+        ROUND(universal_vulnerability_index, 2) AS universal_vulnerability_index,
+        ROUND(observed_avg_temp, 2) AS observed_avg_temp,
+        heat_wave_risk_flag,
+        ROUND(average_age, 1) AS average_age,
+        CAST(households AS INT64) AS households,
+        CAST(no_cars AS INT64) AS no_cars,
+        ROUND(SAFE_DIVIDE(no_cars, NULLIF(households, 0)) * 100.0, 1) AS no_vehicle_rate_pct,
+        urban_density_status,
+        greenery_status,
+        nearby_parks,
+        cooling_center_type,
+        capacity_status,
+        energy_grid_status
+      FROM `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`
+      WHERE LPAD(CAST(geo_id AS STRING), 11, '0') = LPAD(@tract_geoid, 11, '0')
+
+  get_city_uvi_summary:
+    kind: bigquery-sql
+    source: a4i-bigquery
+    description: >-
+      Summarize city-wide climate, demographic, and infrastructure resilience
+      metrics from `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`.
+    statement: |
+      SELECT
+        ANY_VALUE(city) AS city,
+        COUNT(*) AS total_valid_tracts,
+        ROUND(AVG(universal_vulnerability_index), 2) AS avg_uvi,
+        ROUND(MAX(universal_vulnerability_index), 2) AS max_uvi,
+        ROUND(MIN(observed_avg_temp), 2) AS min_observed_temp_f,
+        ROUND(AVG(observed_avg_temp), 2) AS avg_observed_temp_f,
+        ROUND(MAX(observed_avg_temp), 2) AS max_observed_temp_f,
+        COUNTIF(heat_wave_risk_flag = 'Highly Likely') AS highly_likely_heatwave_tracts,
+        COUNTIF(greenery_status = 'Urban Heat Island - Higher Risk') AS uhi_higher_risk_tracts,
+        COUNTIF(urban_density_status = 'Moderate Density') AS moderate_density_tracts,
+        COUNTIF(capacity_status = 'Over Capacity') AS over_capacity_cooling_tracts,
+        CAST(SUM(no_cars) AS INT64) AS total_no_car_households,
+        CAST(SUM(households) AS INT64) AS total_households,
+        ROUND(SAFE_DIVIDE(SUM(no_cars), NULLIF(SUM(households), 0)) * 100.0, 1) AS city_no_vehicle_rate_pct,
+        ROUND(AVG(average_age), 1) AS city_avg_age
+      FROM `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`
+      WHERE average_age > 0 AND universal_vulnerability_index >= 0
+
+  get_equity_audit_cohorts:
+    kind: bigquery-sql
+    source: a4i-bigquery
+    description: >-
+      Compare Top 10 Universal Vulnerability Index tracts, Top 10 Pure Temperature
+      tracts, and the City-Wide Dallas Baseline using ONLY
+      `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`.
+    statement: |
+      WITH clean AS (
+        SELECT
+          LPAD(CAST(geo_id AS STRING), 11, '0') AS geo_id,
+          universal_vulnerability_index,
+          observed_avg_temp,
+          average_age,
+          no_cars,
+          households,
+          SAFE_DIVIDE(no_cars, NULLIF(households, 0)) AS no_vehicle_rate,
+          ROW_NUMBER() OVER (ORDER BY universal_vulnerability_index DESC, no_cars DESC) AS uvi_rank,
+          ROW_NUMBER() OVER (ORDER BY observed_avg_temp DESC) AS temp_rank
+        FROM `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`
+        WHERE average_age > 0 AND universal_vulnerability_index >= 0
+      )
+      SELECT
+        '1_top_10_uvi_priority' AS cohort,
+        COUNT(*) AS num_tracts,
+        ROUND(AVG(universal_vulnerability_index), 2) AS avg_uvi,
+        ROUND(AVG(observed_avg_temp), 2) AS avg_observed_temp_f,
+        ROUND(AVG(no_vehicle_rate) * 100.0, 2) AS avg_no_vehicle_rate_pct,
+        CAST(SUM(no_cars) AS INT64) AS total_no_car_households,
+        ROUND(AVG(average_age), 1) AS avg_age
+      FROM clean
+      WHERE uvi_rank <= 10
+      UNION ALL
+      SELECT
+        '2_top_10_pure_temperature' AS cohort,
+        COUNT(*) AS num_tracts,
+        ROUND(AVG(universal_vulnerability_index), 2) AS avg_uvi,
+        ROUND(AVG(observed_avg_temp), 2) AS avg_observed_temp_f,
+        ROUND(AVG(no_vehicle_rate) * 100.0, 2) AS avg_no_vehicle_rate_pct,
+        CAST(SUM(no_cars) AS INT64) AS total_no_car_households,
+        ROUND(AVG(average_age), 1) AS avg_age
+      FROM clean
+      WHERE temp_rank <= 10
+      UNION ALL
+      SELECT
+        '3_citywide_dallas_baseline' AS cohort,
+        COUNT(*) AS num_tracts,
+        ROUND(AVG(universal_vulnerability_index), 2) AS avg_uvi,
+        ROUND(AVG(observed_avg_temp), 2) AS avg_observed_temp_f,
+        ROUND(AVG(no_vehicle_rate) * 100.0, 2) AS avg_no_vehicle_rate_pct,
+        CAST(SUM(no_cars) AS INT64) AS total_no_car_households,
+        ROUND(AVG(average_age), 1) AS avg_age
+      FROM clean
+      ORDER BY cohort
