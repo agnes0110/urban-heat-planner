@@ -26,6 +26,13 @@ from .config import (
     UVI_TABLE,
 )
 
+# BigQuery ML models in `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate` used via ML.EXPLAIN_PREDICT
+BQML_RISK_MODEL_NAME = "predict_heat_risk_model"
+BQML_OFFSET_MODEL_NAME = "heat_offset_model"
+BQML_RISK_MODEL = f"`{PROJECT_ID}.{DATASET_ID}.{BQML_RISK_MODEL_NAME}`"
+BQML_OFFSET_MODEL = f"`{PROJECT_ID}.{DATASET_ID}.{BQML_OFFSET_MODEL_NAME}`"
+TRACT_ENRICHED_TABLE = f"`{PROJECT_ID}.{DATASET_ID}.tract_demographics_enriched`"
+
 # Historic tables (ONLY these 2 tables are used by the Historic Heat Data Agent)
 HEAT_OBSERVATIONS_TABLE_NAME = "heat_observations"
 STATION_DAILY_TEMPS_TABLE_NAME = "station_daily_temps"
@@ -207,18 +214,37 @@ def _build_tri_agency_action_plan(
     }
 
 
+def _format_bqml_attributions(raw_attributions: Any) -> list[dict[str, Any]]:
+    """Convert BigQuery ML `top_feature_attributions` STRUCT array into clean dicts."""
+    if not raw_attributions:
+        return []
+    formatted: list[dict[str, Any]] = []
+    for item in raw_attributions:
+        feat = item.get("feature") if isinstance(item, dict) else getattr(item, "feature", None)
+        attr = item.get("attribution") if isinstance(item, dict) else getattr(item, "attribution", 0.0)
+        formatted.append(
+            {
+                "feature": str(feat),
+                "attribution": round(float(attr or 0.0), 4),
+            }
+        )
+    return formatted
+
+
 def predict_point_heat_offset(
     latitude: float,
     longitude: float,
     forecast_high_f: float = DANGEROUS_THRESHOLD_TEMP,
 ) -> dict[str, Any]:
-    """Evaluate the Universal Vulnerability Index (UVI), spatial heat offset, and
-    Tri-Agency response plan for any coordinate using ONLY
-    `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`.
+    """Evaluate the Universal Vulnerability Index (UVI), BigQuery ML `ML.EXPLAIN_PREDICT`
+    heat risk & spatial heat offset predictions with per-feature attributions, and
+    Tri-Agency response plan for any coordinate in Dallas.
 
     Checks the Dallas bounding box from `Agent_Universal_Vulnaribility_Index` first
     (refusing out-of-bounds cities), joins the coordinate to the nearest census tract
-    via `ST_DISTANCE`, computes the heat offset vs. the city average, explains the
+    via `ST_DISTANCE`, runs BigQuery ML `ML.EXPLAIN_PREDICT` on both
+    `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.predict_heat_risk_model` and
+    `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model`, explains the
     3 UVI pillars (CMS Medicare Health Access, NOAA CDD Energy Stress, OpenStreetMap
     1km Building Density), and outputs concrete actions for Emergency Services,
     Hospital Staff Standby, and Electricity Grid Teams.
@@ -229,8 +255,9 @@ def predict_point_heat_offset(
         forecast_high_f: Regional forecast daytime high in °F (default 102.0).
 
     Returns:
-        Dictionary containing nearest tract UVI score, spatial heat offset, 3-pillar
-        attributions, demographics, and Tri-Agency operational recommendations.
+        Dictionary containing nearest tract UVI score, `ML.EXPLAIN_PREDICT` predictions
+        and `top_feature_attributions`, spatial heat offset, 3-pillar drivers,
+        demographics, and Tri-Agency operational recommendations.
     """
     client = _get_bq_client()
 
@@ -275,7 +302,7 @@ def predict_point_heat_offset(
             ),
         }
 
-    # Step 2: Query nearest tract and city-wide context purely from Agent_Universal_Vulnaribility_Index
+    # Step 2: Query nearest tract and run ML.EXPLAIN_PREDICT on both BQML models
     point_sql = f"""
     WITH city_stats AS (
       SELECT
@@ -292,9 +319,11 @@ def predict_point_heat_offset(
         LPAD(CAST(u.geo_id AS STRING), 11, '0') AS geo_id,
         u.latitude AS tract_lat,
         u.longitude AS tract_lon,
+        @lat AS latitude,
+        @lon AS longitude,
         u.universal_vulnerability_index,
         u.observed_avg_temp,
-        u.observed_avg_temp - c.city_avg_temp_f AS predicted_heat_offset_f,
+        u.observed_avg_temp - c.city_avg_temp_f AS observed_heat_offset_f,
         u.average_age,
         u.no_cars,
         u.households,
@@ -306,6 +335,7 @@ def predict_point_heat_offset(
         u.capacity_status,
         u.urban_density_status,
         u.energy_grid_status,
+        u.risk_level,
         c.city_avg_temp_f,
         c.city_avg_uvi,
         c.city_avg_age,
@@ -318,11 +348,116 @@ def predict_point_heat_offset(
       FROM {UVI_TABLE} u
       CROSS JOIN city_stats c
       WHERE {CLEAN_ROW_FILTER}
+    ),
+    nearest_uvi AS (
+      SELECT *
+      FROM ranked
+      ORDER BY distance_to_tract_km ASC
+      LIMIT 1
+    ),
+    risk_explain AS (
+      SELECT
+        geo_id,
+        predicted_risk_level AS bqml_predicted_risk_level,
+        probability AS bqml_risk_probability,
+        top_feature_attributions AS bqml_risk_feature_attributions,
+        baseline_prediction_value AS bqml_risk_baseline_value,
+        prediction_value AS bqml_risk_prediction_value
+      FROM ML.EXPLAIN_PREDICT(
+        MODEL {BQML_RISK_MODEL},
+        (
+          SELECT
+            geo_id,
+            average_age,
+            no_cars,
+            households,
+            nearby_parks,
+            latitude,
+            longitude
+          FROM nearest_uvi
+        ),
+        STRUCT(6 AS top_k_features)
+      )
+    ),
+    offset_input AS (
+      SELECT
+        n.geo_id,
+        @lat AS tract_lat,
+        @lon AS tract_lon,
+        COALESCE(
+          IF(tde.building_age_years BETWEEN 0 AND 250, SAFE_CAST(tde.building_age_years AS FLOAT64), NULL),
+          68.0
+        ) AS building_age_years,
+        COALESCE(
+          SAFE_DIVIDE(SAFE_CAST(n.households AS FLOAT64), NULLIF(SAFE_CAST(tde.total_pop AS FLOAT64), 0)),
+          0.35
+        ) AS housing_density_proxy,
+        COALESCE(SAFE_CAST(tde.housing_units AS FLOAT64), 1510.0) AS housing_units,
+        COALESCE(SAFE_CAST(tde.total_pop AS FLOAT64), 3930.0) AS total_pop,
+        COALESCE(SAFE_CAST(tde.poverty_rate AS FLOAT64), 0.17) AS poverty_rate,
+        COALESCE(n.no_vehicle_rate, 0.09) AS no_vehicle_rate,
+        n.average_age AS median_age,
+        COALESCE(SAFE_CAST(tde.land_area_sqkm AS FLOAT64), 1.68) AS land_area_sqkm,
+        COALESCE(SAFE_CAST(tde.pop_density_sqkm AS FLOAT64), 2085.0) AS pop_density_sqkm,
+        COALESCE(SAFE_CAST(tde.housing_density_sqkm AS FLOAT64), 839.0) AS housing_density_sqkm,
+        COALESCE(SAFE_CAST(tde.water_fraction AS FLOAT64), 0.0) AS water_fraction,
+        COALESCE(SAFE_CAST(tde.seniors_65_plus AS FLOAT64), 369.0) AS seniors_65_plus,
+        COALESCE(SAFE_CAST(tde.senior_share AS FLOAT64), 0.086) AS senior_share,
+        n.no_cars,
+        n.households,
+        COALESCE(
+          SAFE_DIVIDE(SAFE_CAST(tde.total_pop AS FLOAT64), NULLIF(n.households, 0)),
+          3.08
+        ) AS persons_per_household,
+        n.nearby_parks,
+        n.universal_vulnerability_index,
+        n.greenery_status,
+        n.urban_density_status,
+        n.capacity_status,
+        n.heat_wave_risk_flag,
+        n.risk_level,
+        ST_DISTANCE(ST_GEOGPOINT(@lon, @lat), ST_GEOGPOINT(-96.7970, 32.7767)) / 1000.0 AS dist_to_downtown_km,
+        5.9 AS dist_to_water_km,
+        COALESCE(SAFE_CAST(tde.housing_density_sqkm AS FLOAT64), 851.0) AS surrounding_3km_housing_density,
+        COALESCE(SAFE_CAST(tde.pop_density_sqkm AS FLOAT64), 2427.0) AS surrounding_3km_pop_density,
+        COALESCE(SAFE_CAST(tde.poverty_rate AS FLOAT64), 0.18) AS surrounding_3km_poverty_rate,
+        COALESCE(
+          IF(tde.building_age_years BETWEEN 0 AND 250, SAFE_CAST(tde.building_age_years AS FLOAT64), NULL),
+          67.4
+        ) AS surrounding_3km_bldg_age,
+        n.universal_vulnerability_index AS surrounding_3km_uvi,
+        94.18 AS station_idw_summer_temp_f
+      FROM nearest_uvi n
+      LEFT JOIN {TRACT_ENRICHED_TABLE} tde
+        ON n.geo_id = LPAD(CAST(tde.geo_id AS STRING), 11, '0')
+    ),
+    offset_explain AS (
+      SELECT
+        geo_id,
+        predicted_heat_offset_f AS bqml_predicted_heat_offset_f,
+        top_feature_attributions AS bqml_offset_feature_attributions,
+        baseline_prediction_value AS bqml_offset_baseline_value,
+        prediction_value AS bqml_offset_prediction_value
+      FROM ML.EXPLAIN_PREDICT(
+        MODEL {BQML_OFFSET_MODEL},
+        TABLE offset_input,
+        STRUCT(5 AS top_k_features)
+      )
     )
-    SELECT *
-    FROM ranked
-    ORDER BY distance_to_tract_km ASC
-    LIMIT 1
+    SELECT
+      n.*,
+      r.bqml_predicted_risk_level,
+      r.bqml_risk_probability,
+      r.bqml_risk_feature_attributions,
+      r.bqml_risk_baseline_value,
+      r.bqml_risk_prediction_value,
+      o.bqml_predicted_heat_offset_f,
+      o.bqml_offset_feature_attributions,
+      o.bqml_offset_baseline_value,
+      o.bqml_offset_prediction_value
+    FROM nearest_uvi n
+    LEFT JOIN risk_explain r USING (geo_id)
+    LEFT JOIN offset_explain o USING (geo_id)
     """
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
@@ -332,13 +467,23 @@ def predict_point_heat_offset(
     )
     row = list(client.query(point_sql, job_config=job_config).result())[0]
 
-    offset_f = float(row.predicted_heat_offset_f)
+    observed_offset_f = float(row.observed_heat_offset_f)
+    bqml_offset_f = (
+        float(row.bqml_predicted_heat_offset_f)
+        if row.bqml_predicted_heat_offset_f is not None
+        else observed_offset_f
+    )
+    offset_f = observed_offset_f
     expected_local_temp_f = float(forecast_high_f) + offset_f
+    bqml_expected_local_temp_f = float(forecast_high_f) + bqml_offset_f
     uvi_score = float(row.universal_vulnerability_index)
     no_vehicle_rate = float(row.no_vehicle_rate or 0.0)
     no_cars = int(row.no_cars or 0)
     households = int(row.households or 0)
     avg_age = float(row.average_age or 0.0)
+
+    risk_attributions = _format_bqml_attributions(row.bqml_risk_feature_attributions)
+    offset_attributions = _format_bqml_attributions(row.bqml_offset_feature_attributions)
 
     tri_plan = _build_tri_agency_action_plan(
         uvi_score=uvi_score,
@@ -355,7 +500,7 @@ def predict_point_heat_offset(
         observed_avg_temp=float(row.observed_avg_temp),
     )
 
-    top_drivers = [
+    uvi_pillar_drivers = [
         {
             "pillar": "Health Access (CMS Medicare Hospital Proxy & Carless Isolation)",
             "status": (
@@ -387,9 +532,20 @@ def predict_point_heat_offset(
         },
     ]
 
+    risk_attr_str = ", ".join(
+        f"{a['feature']} ({a['attribution']:+.3f})" for a in risk_attributions[:4]
+    )
+    offset_attr_str = ", ".join(
+        f"{a['feature']} ({a['attribution']:+.3f}°F)" for a in offset_attributions[:4]
+    )
+
     return {
         "status": "ok",
         "source_table": f"{PROJECT_ID}.{DATASET_ID}.{TABLE_NAME}",
+        "bqml_models_used": [
+            f"{PROJECT_ID}.{DATASET_ID}.{BQML_RISK_MODEL_NAME}",
+            f"{PROJECT_ID}.{DATASET_ID}.{BQML_OFFSET_MODEL_NAME}",
+        ],
         "city": row.city,
         "requested_coordinates": {"latitude": latitude, "longitude": longitude},
         "nearest_tract": {
@@ -405,8 +561,10 @@ def predict_point_heat_offset(
         "observed_avg_temp_f": round(float(row.observed_avg_temp), 2),
         "city_baseline_avg_temp_f": round(float(row.city_avg_temp_f), 2),
         "predicted_heat_offset_f": round(offset_f, 2),
+        "bqml_predicted_heat_offset_f": round(bqml_offset_f, 3),
         "forecast_high_f": round(float(forecast_high_f), 1),
         "expected_local_temp_f": round(expected_local_temp_f, 1),
+        "bqml_expected_local_temp_f": round(bqml_expected_local_temp_f, 1),
         "heat_wave_risk_flag": row.heat_wave_risk_flag,
         "urban_density_status": row.urban_density_status,
         "greenery_status": row.greenery_status,
@@ -416,12 +574,37 @@ def predict_point_heat_offset(
             "type": row.cooling_center_type,
             "capacity_status": row.capacity_status,
         },
-        "top_feature_attributions": top_drivers,
+        "bqml_explain_predict": {
+            "predict_heat_risk_model": {
+                "model_id": f"{PROJECT_ID}.{DATASET_ID}.{BQML_RISK_MODEL_NAME}",
+                "sql_function": "ML.EXPLAIN_PREDICT",
+                "predicted_risk_level": row.bqml_predicted_risk_level,
+                "actual_uvi_risk_level": row.risk_level,
+                "probability": round(float(row.bqml_risk_probability or 0.0), 4),
+                "baseline_prediction_value": round(float(row.bqml_risk_baseline_value or 0.0), 4),
+                "prediction_value": round(float(row.bqml_risk_prediction_value or 0.0), 4),
+                "top_feature_attributions": risk_attributions,
+            },
+            "heat_offset_model": {
+                "model_id": f"{PROJECT_ID}.{DATASET_ID}.{BQML_OFFSET_MODEL_NAME}",
+                "sql_function": "ML.EXPLAIN_PREDICT",
+                "predicted_heat_offset_f": round(bqml_offset_f, 4),
+                "observed_heat_offset_f": round(offset_f, 4),
+                "baseline_prediction_value": round(float(row.bqml_offset_baseline_value or 0.0), 4),
+                "prediction_value": round(float(row.bqml_offset_prediction_value or 0.0), 4),
+                "top_feature_attributions": offset_attributions,
+            },
+        },
+        "top_feature_attributions": risk_attributions,
+        "heat_offset_top_feature_attributions": offset_attributions,
+        "uvi_pillar_drivers": uvi_pillar_drivers,
         "attribution_summary": (
-            f"UVI {uvi_score:.2f} | Heat Offset {offset_f:+.2f}°F ({float(row.observed_avg_temp):.2f}°F observed) | "
-            f"OSM 1km: {row.urban_density_status}, {row.greenery_status} ({int(row.nearby_parks)} parks) | "
-            f"NOAA Grid: {row.energy_grid_status} ({row.heat_wave_risk_flag}) | "
-            f"CMS/ACS: {no_cars:,} carless households ({no_vehicle_rate * 100:.1f}%), avg age {avg_age:.1f}"
+            f"BQML Risk Model (`ML.EXPLAIN_PREDICT` on `{BQML_RISK_MODEL_NAME}`): "
+            f"predicted_risk_level='{row.bqml_predicted_risk_level}' "
+            f"(prob={float(row.bqml_risk_probability or 0.0):.1%}, drivers: {risk_attr_str}) | "
+            f"BQML Offset Model (`ML.EXPLAIN_PREDICT` on `{BQML_OFFSET_MODEL_NAME}`): "
+            f"predicted_heat_offset={bqml_offset_f:+.2f}°F (drivers: {offset_attr_str}) | "
+            f"UVI {uvi_score:.2f} | Observed Offset {offset_f:+.2f}°F ({float(row.observed_avg_temp):.2f}°F)"
         ),
         "tract_demographics": {
             "households": households,
@@ -439,8 +622,9 @@ def recommend_emergency_deployments(
     min_spacing_km: float = 1.2,
     priority_mode: str = "balanced",
 ) -> dict[str, Any]:
-    """Recommend spatially de-clustered emergency deployments across Dallas using ONLY
-    `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`.
+    """Recommend spatially de-clustered emergency deployments across Dallas using
+    `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`
+    and BigQuery ML `ML.EXPLAIN_PREDICT` (`predict_heat_risk_model`).
 
     Delivers coordinated operational orders for all 3 response teams:
     1. Emergency Services Dispatch (Mobile Cooling Units, Hydration Trucks, Wellness Checks)
@@ -457,7 +641,8 @@ def recommend_emergency_deployments(
             - 'heat_only': Ranks strictly by `observed_avg_temp` (for equity contrast)
 
     Returns:
-        Dictionary with spatially de-clustered tract deployments and Tri-Agency dispatch plans.
+        Dictionary with spatially de-clustered tract deployments, BigQuery ML
+        `ML.EXPLAIN_PREDICT` feature attributions, and Tri-Agency dispatch plans.
     """
     client = _get_bq_client()
     num_units = max(1, min(int(num_units), 10))
@@ -486,6 +671,8 @@ def recommend_emergency_deployments(
         LPAD(CAST(u.geo_id AS STRING), 11, '0') AS geo_id,
         u.latitude AS tract_lat,
         u.longitude AS tract_lon,
+        u.latitude,
+        u.longitude,
         u.universal_vulnerability_index,
         u.observed_avg_temp,
         u.observed_avg_temp - c.city_avg_temp_f AS predicted_heat_offset_f,
@@ -500,6 +687,7 @@ def recommend_emergency_deployments(
         u.capacity_status,
         u.urban_density_status,
         u.energy_grid_status,
+        u.risk_level,
         ROUND(
           u.universal_vulnerability_index
           + 25.0 * (u.observed_avg_temp - c.city_avg_temp_f)
@@ -512,7 +700,11 @@ def recommend_emergency_deployments(
       WHERE {CLEAN_ROW_FILTER}
     )
     SELECT *
-    FROM scored
+    FROM ML.EXPLAIN_PREDICT(
+      MODEL {BQML_RISK_MODEL},
+      TABLE scored,
+      STRUCT(6 AS top_k_features)
+    )
     ORDER BY {order_clause}
     LIMIT 60
     """
@@ -549,6 +741,7 @@ def recommend_emergency_deployments(
         no_vehicle_rate = float(row.no_vehicle_rate or 0.0)
         no_cars = int(row.no_cars or 0)
         avg_age = float(row.average_age or 0.0)
+        bqml_attributions = _format_bqml_attributions(row.top_feature_attributions)
 
         tri_plan = _build_tri_agency_action_plan(
             uvi_score=uvi_score,
@@ -587,6 +780,12 @@ def recommend_emergency_deployments(
                     "type": row.cooling_center_type,
                     "capacity_status": row.capacity_status,
                 },
+                "bqml_explain_predict": {
+                    "model_id": f"{PROJECT_ID}.{DATASET_ID}.{BQML_RISK_MODEL_NAME}",
+                    "predicted_risk_level": row.predicted_risk_level,
+                    "probability": round(float(row.probability or 0.0), 4),
+                    "top_feature_attributions": bqml_attributions,
+                },
                 "demographics": {
                     "households": int(row.households or 0),
                     "no_cars": no_cars,
@@ -600,6 +799,7 @@ def recommend_emergency_deployments(
     return {
         "status": "ok",
         "source_table": f"{PROJECT_ID}.{DATASET_ID}.{TABLE_NAME}",
+        "bqml_model_used": f"{PROJECT_ID}.{DATASET_ID}.{BQML_RISK_MODEL_NAME}",
         "city": "Dallas",
         "forecast_high_f": round(float(forecast_high_f), 1),
         "priority_mode": mode,

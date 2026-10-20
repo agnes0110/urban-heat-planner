@@ -33,6 +33,11 @@ The `Agent_Universal_Vulnaribility_Index` table tracks climate vulnerability, ex
 2. **Energy Stress (NOAA Weather)**: Calculates Cooling Degree Days (CDD) for 2023 (`energy_grid_status`, `observed_avg_temp`, `heat_wave_risk_flag`) to measure regional power grid demand for air conditioning.
 3. **Urban Heat Island (OpenStreetMap)**: Counts building density within 1km of each region via `ST_DWithin` (`urban_density_status`, `greenery_status`, `nearby_parks`). High density means more concrete, less airflow, and higher trapped heat (Albedo effect).
 
+### C. BigQuery ML `ML.EXPLAIN_PREDICT` Explainability
+Operational tools (`predict_point_heat_offset`, `recommend_emergency_deployments`, and `compare_deployment_sites` in [`agent/tools.py`](file:///config/urban-heat-planner/agent/tools.py) plus `explain_predict_point_heat_risk` and `get_top_emergency_tracts` in [`agent/tools.yaml`](file:///config/urban-heat-planner/agent/tools.yaml)) execute live BigQuery ML `ML.EXPLAIN_PREDICT` queries against:
+- **`qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.predict_heat_risk_model`** (`LOGISTIC_REGRESSION`, ROC AUC = 0.916): Predicts `predicted_risk_level`, `probability`, and exact `top_feature_attributions` (`STRUCT(6 AS top_k_features)`) over `average_age`, `no_cars`, `households`, `nearby_parks`, `latitude`, and `longitude` from `Agent_Universal_Vulnaribility_Index`.
+- **`qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model`** (`LINEAR_REGRESSION`, MAE = 0.30°F, R² = 0.48): Predicts `predicted_heat_offset_f` (`bqml_predicted_heat_offset_f`) and top feature attributions (`STRUCT(5 AS top_k_features)`).
+
 ---
 
 ## 2. Unique Selling Proposition (Tri-Agency Operational Dispatch)
