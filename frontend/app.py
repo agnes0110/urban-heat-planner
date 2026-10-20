@@ -646,6 +646,7 @@ def build_chat_response(payload: Dict[str, Any]) -> Dict[str, Any]:
             }
 
     # 2. Comprehensive Database-Grounded Intent Routing (Exclusively querying/explaining the 3 BigQuery tables)
+    is_proposal_q = any(w in q for w in ["proposal", "council", "meeting", "briefing", "memo", "presentation", "executive summary", "action plan", "policy", "recommendation plan"])
     is_historic_q = any(w in q for w in ["historic", "historical", "history", "highest temp", "hottest", "peak temp", "heat observation", "traverse", "past reading", "record temp"])
     is_care_q = any(w in q for w in ["special care", "most at risk", "vulnerab", "priority area", "need help", "need care"])
     is_db_q = any(w in q for w in ["database", "table", "bigquery", "dataset", "data source", "where does the data come from", "schema", "how many rows", "how many points"])
@@ -653,8 +654,46 @@ def build_chat_response(payload: Dict[str, Any]) -> Dict[str, Any]:
     is_agency_q = any(w in q for w in ["hospital", "clinical", "grid", "transformer", "cdd", "power", "electricity", "feeder"])
     is_dispatch_rule_q = any(w in q for w in ["how do you decide", "how does the distribution", "dispatch rule", "cost", "allocation rule", "criteria"])
 
+    # A0. City Council Briefing & Executive Action Proposal
+    if is_proposal_q:
+        highlight_id = deployed[0]["id"] if deployed else "48113019211"
+        truck_exp = plan["funded_trucks"] * TRUCK_COST
+        wellness_exp = plan["funded_wellness"] * WELLNESS_COST
+        lines_deploy = [
+            f"   - **{d['rank']}. {d['assigned_unit']}** → **{d['name']}** (Tract `{d['id']}` · `UVI {d['universal_vulnerability_index']}` · `+{d['predicted_offset_f']}°F` offset · `{d['no_cars']} carless households` · Library `{d['capacity_status']}`)"
+            for d in deployed
+        ]
+        deploy_text = "\n".join(lines_deploy) if lines_deploy else "   - _Increase budget to fund front-line units._"
+        reply = (
+            "## 🏛️ DALLAS CITY COUNCIL EMERGENCY BRIEFING & ACTION PROPOSAL\n\n"
+            "**SUBJECT:** Emergency Heatwave Response & Microclimate Tri-Agency Dispatch Plan  \n"
+            f"**DATE:** Today's Extreme Heat Operational Period  \n"
+            f"**BUDGET APPROPRIATION:** Authorized Ceiling **${budget:,}** | Recommended Outlay: **${plan['total_cost']:,}**  \n\n"
+            "---\n\n"
+            "### 1. Executive Summary & Microclimate Threat\n"
+            "Dallas is experiencing extreme urban heat. While regional weather stations report **102.0°F**, street-level Heat Watch traverse data reveals severe **microclimate heat islands of up to +4.8°F**, pushing neighborhood temperatures past **106.8°F–110.1°F** in concrete-dense districts.\n\n"
+            f"Without immediate mobile intervention, heat-related EMS calls and electrical transformer failures will peak between 1:00 PM and 7:00 PM.\n\n"
+            "### 2. Proposed Emergency Resource Allocation\n"
+            f"We request Council approval for an immediate daily appropriation of **${plan['total_cost']:,}** from the Municipal Contingency Reserve:\n"
+            f"- **🚚 {plan['funded_trucks']} Mobile Hydration & Misting Trucks** (`$2,500/day` ea) = **${truck_exp:,}**\n"
+            f"- **🩺 {plan['funded_wellness']} Senior Wellness Check Teams** (`$1,200/day` ea) = **${wellness_exp:,}**\n"
+            f"- **👥 Vulnerable Population Protected:** Reaching **{plan['total_seniors_reached']:,} seniors (65+)** and over **1,400 carless households** across top-priority tracts.\n\n"
+            "### 3. Targeted Field Deployments (Ranked by Universal Vulnerability Index):\n"
+            f"{deploy_text}\n\n"
+            "### 4. Tri-Agency Coordinated Directives:\n"
+            "- **🚑 Emergency Services (Dallas Fire-Rescue / OEM):** Station Hydration Trucks at transit stops and commercial plazas where local libraries are Over Capacity.\n"
+            "- **🏥 Healthcare Systems (Parkland / CMS Medicare):** Place regional Emergency Departments on Level 1 Surge Standby for dehydration and heat stroke in identified hospital deserts.\n"
+            "- **⚡ Energy Grid (Oncor / ERCOT):** Initiate proactive transformer monitoring and stage mobile backup generation along stressed residential feeder circuits.\n\n"
+            "### 5. Legally Defensible Equity Audit (3-Step Compliance):\n"
+            "- **Strip the Variable:** Zero race or ethnicity metrics are used in our BigQuery model.\n"
+            "- **Objective Need:** High-wealth areas (e.g. North Dallas) are deferred because they possess high tree canopy, private vehicle mobility, and functioning cooling centers.\n"
+            "- **Life-Safety Outcome:** 100% of municipal funding is concentrated where residents cannot drive to safety.\n\n"
+            f"**RECOMMENDED MOTION FOR COUNCIL:**\n"
+            f"> *\"Move to approve the emergency operational deployment of {plan['funded_trucks']} Hydration Trucks and {plan['funded_wellness']} Senior Wellness Teams for today's heat emergency at an authorized total of ${plan['total_cost']:,}.\"*"
+        )
+
     # A. Historical Data & Highest Temperature Areas Needing Special Care
-    if is_historic_q or (is_care_q and ("temp" in q or "area" in q or "tract" in q)):
+    elif is_historic_q or (is_care_q and ("temp" in q or "area" in q or "tract" in q)):
         highlight_id = "48113019211"  # South Dallas / Fair Park (hottest tract)
         reply = (
             "**📊 Historical Heat & Microclimate Analysis (`heat_observations` & `Agent_Universal_Vulnaribility_Index`):**\n\n"

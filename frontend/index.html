@@ -662,28 +662,48 @@
       const trucks = Math.max(0, parseInt(document.getElementById("trucks-input").value, 10) || 0);
       const wellness = Math.max(0, parseInt(document.getElementById("wellness-input").value, 10) || 0);
 
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: text,
-          budget: budget,
-          hydration_trucks: trucks,
-          wellness_teams: wellness,
-          selected_tract_id: selectedTractId,
-        }),
-      });
-      const data = await res.json();
-      currentPlan = data.plan;
-      if (data.highlight_tract_id) {
-        selectedTractId = data.highlight_tract_id;
-        isCardOpen = true;
-      }
-      appendMessage("agent", data.reply);
-      renderAll();
-      const n = currentPlan.neighborhoods.find((item) => item.id === selectedTractId);
-      if (n) {
-        map.panTo([n.lat + 0.015, n.lon + 0.035], { animate: true });
+      const chatContainer = document.getElementById("chat-messages");
+      const loadingDiv = document.createElement("div");
+      loadingDiv.id = "chat-loading-indicator";
+      loadingDiv.className = "mr-4 bg-slate-800/60 border border-slate-700/60 rounded-xl p-3 text-xs text-slate-400 italic flex items-center gap-2";
+      loadingDiv.innerHTML = `<span class="inline-block animate-pulse">⏳</span> Synthesizing BigQuery microclimate data...`;
+      chatContainer.appendChild(loadingDiv);
+      chatContainer.scrollTop = chatContainer.scrollHeight;
+
+      try {
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message: text,
+            budget: budget,
+            hydration_trucks: trucks,
+            wellness_teams: wellness,
+            selected_tract_id: selectedTractId,
+          }),
+        });
+        if (!res.ok) {
+          throw new Error(`Server returned HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        const loadEl = document.getElementById("chat-loading-indicator");
+        if (loadEl) loadEl.remove();
+
+        currentPlan = data.plan;
+        if (data.highlight_tract_id) {
+          selectedTractId = data.highlight_tract_id;
+          isCardOpen = true;
+        }
+        appendMessage("agent", data.reply);
+        renderAll();
+        const n = currentPlan.neighborhoods.find((item) => item.id === selectedTractId);
+        if (n) {
+          map.panTo([n.lat + 0.015, n.lon + 0.035], { animate: true });
+        }
+      } catch (err) {
+        const loadEl = document.getElementById("chat-loading-indicator");
+        if (loadEl) loadEl.remove();
+        appendMessage("agent", `⚠️ **Dispatch Network Notice**: Unable to reach backend (${err.message}). Reconnecting...`);
       }
     }
 
