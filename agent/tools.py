@@ -49,9 +49,30 @@ _bq_client: bigquery.Client | None = None
 
 
 def _get_bq_client() -> bigquery.Client:
-    """Return a cached BigQuery client initialized for the target project."""
+    """Return a cached BigQuery client initialized for the target project.
+    Automatically uses `gcloud auth print-access-token` in Cloud Shell to avoid
+    GCE metadata server RefreshError.
+    """
     global _bq_client
     if _bq_client is None:
+        import os
+        import shutil
+        import subprocess
+
+        if os.environ.get("CLOUD_SHELL") == "true" and shutil.which("gcloud"):
+            try:
+                from google.oauth2.credentials import Credentials
+
+                tok = subprocess.check_output(
+                    ["gcloud", "auth", "print-access-token"], text=True, timeout=5
+                ).strip()
+                if tok:
+                    _bq_client = bigquery.Client(
+                        project=PROJECT_ID, credentials=Credentials(token=tok)
+                    )
+                    return _bq_client
+            except Exception:
+                pass
         _bq_client = bigquery.Client(project=PROJECT_ID)
     return _bq_client
 
@@ -207,10 +228,14 @@ def _build_tri_agency_action_plan(
             "hospital_staff_standby": {
                 "alert_level": hospital_alert_level,
                 "action": hospital_action,
+                "directive": hospital_action,
+                "reasoning": f"UVI={uvi_score:.1f} with {no_cars:,} carless households ({no_vehicle_rate * 100:.1f}%) and median age {average_age:.1f}.",
             },
             "electricity_grid_response": {
                 "alert_level": grid_alert_level,
                 "action": grid_action,
+                "directive": grid_action,
+                "reasoning": f"NOAA CDD grid status '{energy_grid_status}', heatwave flag '{heat_wave_risk_flag}', and urban density '{urban_density_status}' ({observed_avg_temp:.1f}°F).",
             },
         },
         "uvi_pillars": uvi_pillars,

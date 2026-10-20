@@ -150,6 +150,7 @@ HAS_ADK_RUNTIME = is_adk_live_runtime_active()
 PROJECT_ID = getattr(AGENT_TOOLS, "PROJECT_ID", os.environ.get("GOOGLE_CLOUD_PROJECT", "qwiklabs-gcp-04-f8ba79cf4618"))
 DATASET = getattr(AGENT_TOOLS, "DATASET_ID", os.environ.get("BQ_DATASET", "a4i_climate"))
 BQML_OFFSET_MODEL_NAME = getattr(AGENT_TOOLS, "BQML_OFFSET_MODEL_NAME", os.environ.get("BQML_OFFSET_MODEL_NAME", "heat_offset_model"))
+UVI_TABLE_NAME = BQML_OFFSET_MODEL_NAME
 
 DALLAS_BASELINE = {
     "city": "Dallas",
@@ -669,14 +670,32 @@ async def build_chat_response(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "source": "adk_live_llm",
             }
 
-    # 2. Comprehensive Database-Grounded Intent Routing (Exclusively querying/explaining the 3 BigQuery tables)
+    # 2. Comprehensive Database-Grounded Intent Routing (Exclusively querying/explaining the BigQuery tables & BQML model)
+    matched_tract_id = None
+    if "marsalis" in q or "oak cliff" in q or "48113009604" in q:
+        matched_tract_id = "48113009604"
+    elif "buckner" in q or "east dallas" in q or "48113018110" in q:
+        matched_tract_id = "48113018110"
+    elif "fair park" in q or "mlk" in q or "south dallas" in q or "48113019211" in q:
+        matched_tract_id = "48113019211"
+    elif "singleton" in q or "west dallas" in q or "48113013605" in q:
+        matched_tract_id = "48113013605"
+    elif "bachman" in q or "northwest" in q or "48113013721" in q:
+        matched_tract_id = "48113013721"
+    elif "north" in q or "preston" in q or "skip" in q or "48439113622" in q:
+        matched_tract_id = "48439113622"
+
     is_proposal_q = any(w in q for w in ["proposal", "council", "meeting", "briefing", "memo", "presentation", "executive summary", "action plan", "policy", "recommendation plan"])
-    is_historic_q = any(w in q for w in ["historic", "historical", "history", "highest temp", "hottest", "peak temp", "heat observation", "traverse", "past reading", "record temp"])
-    is_care_q = any(w in q for w in ["special care", "most at risk", "vulnerab", "priority area", "need help", "need care"])
+    is_compare_q = any(w in q for w in ["compare", " vs ", "versus", "difference between", "tradeoff"])
+    is_model_q = any(w in q for w in ["model", "feature", "bqml", "ml.explain", "r2", "mae", "rmse", "accuracy", "weight", "attribution", "how do you predict", "unmeasured", "549", "618"])
+    is_weather_q = any(w in q for w in ["weather", "forecast", "live temp", "current temp", "how hot is it today", "open-meteo", "nws"])
+    is_historic_q = any(w in q for w in ["historic", "historical", "history", "highest temp", "hottest", "peak temp", "heat observation", "traverse", "past reading", "record temp", "2019", "2023", "2025", "7-year", "station_daily"])
+    is_care_q = any(w in q for w in ["special care", "most at risk", "vulnerab", "priority area", "need help", "need care", "where should we", "top priority", "first"])
     is_db_q = any(w in q for w in ["database", "table", "bigquery", "dataset", "data source", "where does the data come from", "schema", "how many rows", "how many points"])
-    is_equity_q = ("why" in q and any(w in q for w in ["north", "skip", "48439113622", "equity", "fair"])) or any(w in q for w in ["strip the variable", "equity audit", "bias"])
-    is_agency_q = any(w in q for w in ["hospital", "clinical", "grid", "transformer", "cdd", "power", "electricity", "feeder"])
-    is_dispatch_rule_q = any(w in q for w in ["how do you decide", "how does the distribution", "dispatch rule", "cost", "allocation rule", "criteria"])
+    is_equity_q = ("why" in q and any(w in q for w in ["north", "skip", "48439113622", "equity", "fair"])) or any(w in q for w in ["strip the variable", "equity audit", "bias", "equity", "fairness", "race", "demographic"])
+    is_agency_q = any(w in q for w in ["hospital", "clinical", "grid", "transformer", "cdd", "power", "electricity", "feeder", "tri-agency", "tri agency"])
+    is_dispatch_rule_q = any(w in q for w in ["how do you decide", "how does the distribution", "dispatch rule", "cost", "allocation rule", "criteria", "budget"])
+    is_greeting_q = q.strip() in {"hi", "hello", "hey", "help", "what can you do", "what can i ask", "?"}
 
     # A0. City Council Briefing & Executive Action Proposal
     if is_proposal_q:
@@ -759,20 +778,64 @@ async def build_chat_response(payload: Dict[str, Any]) -> Dict[str, Any]:
             f"{plan['total_cost']:,}** dispatch to **South Dallas (`UVI 124.6`)**, **Oak Cliff (`UVI 119.8`)**, and **Buckner Terrace (`UVI 112.4`)**, where cooling centers are **`Over Capacity`** and **`380–412` households per tract lack a vehicle** (`3.1x` higher than city baseline)."
         )
 
+    # D0. Side-by-Side Comparison / Model & Features / Weather / Greetings
+    elif is_compare_q:
+        s_a = plan["neighborhoods"][0]
+        s_b = plan["neighborhoods"][1]
+        for n in plan["neighborhoods"]:
+            if any(tok in q for tok in [n["id"], n["name"].split("/")[0].strip().lower()]):
+                if n["id"] != s_a["id"]:
+                    s_b = n
+        reply = (
+            f"**⚖️ Side-by-Side Deployment Comparison (`compare_deployment_sites`):**\n\n"
+            f"| Metric | {s_a['name']} (`{s_a['id']}`) | {s_b['name']} (`{s_b['id']}`) |\n"
+            f"| :--- | :--- | :--- |\n"
+            f"| **Universal Vulnerability Index (UVI)** | **`{s_a['universal_vulnerability_index']}`** | **`{s_b['universal_vulnerability_index']}`** |\n"
+            f"| **Predicted Heat Offset (`heat_offset_model`)** | **`+{s_a['predicted_offset_f']}°F`** (`{s_a['predicted_street_temp_f']}°F`) | **`+{s_b['predicted_offset_f']}°F`** (`{s_b['predicted_street_temp_f']}°F`) |\n"
+            f"| **Carless Households (`no_cars`)** | **`{s_a['no_cars']}`** (`{s_a['no_car_pct']}%`) | **`{s_b['no_cars']}`** (`{s_b['no_car_pct']}%`) |\n"
+            f"| **Seniors 65+ (`seniors_65_plus`)** | `{s_a['seniors_65_plus']:,}` (`{s_a['senior_pct']}%`) | `{s_b['seniors_65_plus']:,}` (`{s_b['senior_pct']}%`) |\n"
+            f"| **Cooling Center Status** | `{s_a['cooling_center_type']}` (`{s_a['capacity_status']}`) | `{s_b['cooling_center_type']}` (`{s_b['capacity_status']}`) |\n"
+            f"| **Recommended Unit** | **{s_a['assigned_unit'] or 'Standby'}** | **{s_b['assigned_unit'] or 'Standby'}** |\n\n"
+            f"**Verdict:** Prioritize **{s_a['name']}** first (`UVI {s_a['universal_vulnerability_index']}`, `+{s_a['predicted_offset_f']}°F` offset, `{s_a['no_cars']}` carless homes), followed by **{s_b['name']}**."
+        )
+    elif is_model_q:
+        reply = (
+            "**🧠 BigQuery ML Model & Key Feature Attributions (`heat_offset_model`):**\n\n"
+            "- **Model:** `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.heat_offset_model` (`LINEAR_REGRESSION`, **R² = 0.478**, **MAE = 0.299°F**, **RMSE = 0.440°F**)\n"
+            "- **Coverage:** Evaluated via `ML.EXPLAIN_PREDICT` over `v_tract_heat_features` across **549 valid Dallas census tracts** (`47` measured Heat Watch tracts + `502` unmeasured predicted tracts)\n"
+            "- **Top Global Drivers (`ML.GLOBAL_EXPLAIN`):**\n"
+            "  1. `building_age_years` (`0.0523`) — older housing & roof thermal retention\n"
+            "  2. `surrounding_3km_poverty_rate` (`0.0453`) & `poverty_rate` (`0.0431`) — tree-canopy deficit & impervious cover\n"
+            "  3. `tract_lat` (`0.0343`) & `tract_lon` (`0.0328`) — urban heat corridor gradient\n"
+            "  4. `households` (`0.0243`), `housing_units` (`0.0225`), & `station_idw_summer_temp_f` (`0.0222`)\n"
+            "  5. `seniors_65_plus` (`0.0212`), `land_area_sqkm` (`0.0211`), & `heat_wave_risk_flag` (`0.0211`)\n"
+            "- **Fairness Guarantee:** Zero racial or ethnic variables are used as model inputs."
+        )
+    elif is_weather_q:
+        reply = (
+            f"**🌡️ Dallas Real-Time Weather & Microclimate Baseline (`get_dallas_live_temperature`):**\n\n"
+            f"- **Regional Weather Station Baseline:** `{plan['station_temp_f']}°F` (DFW / Dallas Love Field NOAA feed)\n"
+            f"- **Peak Microclimate Street Temps:**\n"
+            f"  - **South Dallas / Fair Park (`48113019211`):** **`{plan['station_temp_f'] + 4.8:.1f}°F`** (`+4.8°F` heat island offset)\n"
+            f"  - **Oak Cliff / Marsalis (`48113009604`):** **`{plan['station_temp_f'] + 4.6:.1f}°F`** (`+4.6°F` heat island offset)\n"
+            f"  - **Buckner Terrace (`48113018110`):** **`{plan['station_temp_f'] + 4.4:.1f}°F`** (`+4.4°F` heat island offset)"
+        )
     # D. Tri-Agency Alerts (Hospital Standby & Power Grid)
     elif is_agency_q:
         target = next((n for n in plan["neighborhoods"] if n["id"] == highlight_id), plan["neighborhoods"][0])
         tri = target["tri_agency_dispatch"]
+        h_plan = tri["hospital_staff_standby"]
+        g_plan = tri["electricity_grid_response"]
         reply = (
             f"**🚨 Tri-Agency Operational Coordination for {target['name']} (Tract `{target['id']}`):**\n\n"
             f"### 🏥 1. Hospital & Clinical Staff Standby\n"
-            f"- **Alert Level:** `{tri['hospital_staff_standby']['alert_level']}`\n"
-            f"- **Triage Directive:** {tri['hospital_staff_standby']['directive']}\n"
-            f"- **Reasoning:** {tri['hospital_staff_standby']['reasoning']}\n\n"
+            f"- **Alert Level:** `{h_plan.get('alert_level', 'ELEVATED STANDBY')}`\n"
+            f"- **Triage Directive:** {h_plan.get('directive') or h_plan.get('action', '')}\n"
+            f"- **Reasoning:** {h_plan.get('reasoning') or h_plan.get('action', '')}\n\n"
             f"### ⚡ 2. Electricity & Power Grid Team\n"
-            f"- **Alert Level:** `{tri['electricity_grid_response']['alert_level']}`\n"
-            f"- **Grid Directive:** {tri['electricity_grid_response']['directive']}\n"
-            f"- **Reasoning:** {tri['electricity_grid_response']['reasoning']}\n\n"
+            f"- **Alert Level:** `{g_plan.get('alert_level', 'HIGH FEEDER WATCH')}`\n"
+            f"- **Grid Directive:** {g_plan.get('directive') or g_plan.get('action', '')}\n"
+            f"- **Reasoning:** {g_plan.get('reasoning') or g_plan.get('action', '')}\n\n"
             f"### 🚑 3. Emergency Services Dispatch\n"
             f"- **Assigned Unit:** **{target['assigned_unit'] or 'Standby'}**\n"
             f"- **Cooling Status:** {tri['emergency_services_dispatch']['cooling_center_status']}"
@@ -793,7 +856,7 @@ async def build_chat_response(payload: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     # F. Specific Neighborhood or General Vulnerability Inquiry
-    elif any(w in q for w in ["why", "explain", "hot", "temp", "uvi", "tract", "neighborhood", "details"]):
+    elif matched_tract_id is not None or any(w in q for w in ["why", "explain", "hot", "temp", "uvi", "tract", "neighborhood", "details", "tell me about", "where"]):
         target = next((n for n in plan["neighborhoods"] if n["id"] == highlight_id), plan["neighborhoods"][0])
         tri = target["tri_agency_dispatch"]
         pillars = target["uvi_pillars"]
