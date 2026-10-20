@@ -22,14 +22,14 @@ Data Architecture (`qwiklabs-gcp-04-f8ba79cf4618.a4i_climate`):
 
 from __future__ import annotations
 
-import os
-from dotenv import load_dotenv
 from google.adk.agents import Agent
 
+from .config import ADK_MODEL
 from .tools import (
     audit_deployment_equity,
     compare_deployment_sites,
     get_city_uvi_and_infrastructure_summary,
+    get_dallas_live_temperature,
     get_heat_frequency_and_trends,
     get_historic_heat_observations,
     get_historic_location_profile,
@@ -38,9 +38,7 @@ from .tools import (
     recommend_emergency_deployments,
 )
 
-load_dotenv()
-
-MODEL_NAME = os.environ.get("ADK_MODEL", "gemini-2.5-flash")
+MODEL_NAME = ADK_MODEL
 
 # ---------------------------------------------------------------------------
 # Sub-Agent 1: Historic Heat & 7-Year Station Frequency Specialist
@@ -116,6 +114,7 @@ Your data comes **100% exclusively** from BigQuery table `qwiklabs-gcp-04-f8ba79
 
 ### Mandatory Operating Rules
 1. **Call Tools First**:
+   - Whenever the user asks for live/current Dallas weather or does not provide a specific `forecast_high_f`, call `get_dallas_live_temperature(latitude, longitude)` first to fetch real-time Dallas temperature, heat index, and forecast high (`recommended_forecast_high_f`).
    - For any specific coordinate (`latitude`, `longitude`), call `predict_point_heat_offset(latitude, longitude, forecast_high_f)`.
    - For city-wide UVI risk, heatwave flag distribution (`Highly Likely` vs. `Moderate`), OpenStreetMap 1km building density/greenery breakdown, or cooling center capacity across the 85 tracts, call `get_city_uvi_and_infrastructure_summary(threshold_f)`.
 2. **Explain the 3 UVI Pillars Clearly**:
@@ -126,6 +125,7 @@ Your data comes **100% exclusively** from BigQuery table `qwiklabs-gcp-04-f8ba79
    - If `predict_point_heat_offset` returns `status == "out_of_bounds"`, explicitly refuse to extrapolate outside the Dallas coverage area in `Agent_Universal_Vulnaribility_Index`.
 """,
     tools=[
+        get_dallas_live_temperature,
         predict_point_heat_offset,
         get_city_uvi_and_infrastructure_summary,
     ],
@@ -162,11 +162,13 @@ Your mission is to turn data from `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agen
 - Instruct utility crews to monitor distribution transformers, suspend non-essential switching, and pre-stage mobile backup generators for rapid power grid outage response.
 
 ### Mandatory Tool Usage
+- If the user asks about live conditions or does not specify `forecast_high_f`, call `get_dallas_live_temperature()` first and pass its `recommended_forecast_high_f` into the dispatch/comparison tools.
 - Call `recommend_emergency_deployments(forecast_high_f, num_units, min_spacing_km, priority_mode)` for multi-unit dispatch plans.
 - Call `compare_deployment_sites(lat_a, lon_a, label_a, lat_b, lon_b, label_b, forecast_high_f)` when comparing two locations.
 - Always cite exact `geo_id`, coordinates, `universal_vulnerability_index`, `observed_avg_temp`, `no_cars` (`no_vehicle_rate_pct`), `average_age`, `urban_density_status`, `greenery_status`, `capacity_status`, and `energy_grid_status`.
 """,
     tools=[
+        get_dallas_live_temperature,
         recommend_emergency_deployments,
         compare_deployment_sites,
         predict_point_heat_offset,
@@ -244,9 +246,12 @@ For every emergency deployment recommendation, provide actionable directives for
 ### Sub-Agent & Tool Routing
 - **Historic Data / 7-Year Station Frequency / Weather Station Trends / Street-Level `heat_observations` Campaign**:
   - **Delegate strictly to the `historic_heat_data_agent` sub-agent** (which owns `get_heat_frequency_and_trends`, `get_station_daily_temp_history`, `get_historic_heat_observations`, and `get_historic_location_profile` and queries **ONLY** `station_daily_temps` and `heat_observations`).
+- **Live Dallas Weather / Real-Time Simulation ("What's the live temperature in Dallas, and where do our units go right now?")**:
+  - Call `get_dallas_live_temperature(latitude, longitude)` to fetch real-time Dallas temperature (`live_temperature_f`), heat index (`feels_like_heat_index_f`), humidity, and `recommended_forecast_high_f`, then pass that temperature into `recommend_emergency_deployments` or `predict_point_heat_offset`.
 - **Emergency Deployment Plan ("It's 102°F tomorrow, where do our units go?")**:
-  1. Call `recommend_emergency_deployments` (or delegate to `triage_dispatch_agent`) to get spatially de-clustered tracts (`min_spacing_km`) and Tri-Agency orders.
-  2. Call `audit_deployment_equity` (or delegate to `equity_audit_agent`) so every deployment plan includes the **3-Step Equity Audit** (*"Strip the variable. Audit the outcome. Say you did both."*).
+  1. If no forecast temperature was given by the user, call `get_dallas_live_temperature()` first.
+  2. Call `recommend_emergency_deployments` (or delegate to `triage_dispatch_agent`) to get spatially de-clustered tracts (`min_spacing_km`) and Tri-Agency orders.
+  3. Call `audit_deployment_equity` (or delegate to `equity_audit_agent`) so every deployment plan includes the **3-Step Equity Audit** (*"Strip the variable. Audit the outcome. Say you did both."*).
 - **Specific Coordinate / Neighborhood Vulnerability Inquiry**:
   - Call `predict_point_heat_offset(latitude, longitude, forecast_high_f)` (or delegate to `microclimate_risk_agent`). If out of bounds (outside Dallas), politely refuse to extrapolate.
 - **Side-by-Side Site Comparison**:
@@ -259,6 +264,7 @@ For every emergency deployment recommendation, provide actionable directives for
 - Operational census-tract dispatch is scoped to the 85 valid Dallas census tracts in `Agent_Universal_Vulnaribility_Index` and cannot simulate post-intervention temperature reductions.
 """,
     tools=[
+        get_dallas_live_temperature,
         predict_point_heat_offset,
         recommend_emergency_deployments,
         compare_deployment_sites,

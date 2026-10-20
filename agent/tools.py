@@ -11,15 +11,20 @@ Data Sources in `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate`:
 from __future__ import annotations
 
 import math
-import os
 from typing import Any
 
+import requests
 from google.cloud import bigquery
 
-PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "qwiklabs-gcp-04-f8ba79cf4618")
-DATASET_ID = os.environ.get("BQ_DATASET", "a4i_climate")
-TABLE_NAME = os.environ.get("BQ_TABLE", "Agent_Universal_Vulnaribility_Index")
-UVI_TABLE = f"`{PROJECT_ID}.{DATASET_ID}.{TABLE_NAME}`"
+from .config import (
+    DALLAS_DEFAULT_LAT,
+    DALLAS_DEFAULT_LON,
+    DANGEROUS_THRESHOLD_TEMP,
+    DATASET_ID,
+    PROJECT_ID,
+    TABLE_NAME,
+    UVI_TABLE,
+)
 
 # Historic tables (ONLY these 2 tables are used by the Historic Heat Data Agent)
 HEAT_OBSERVATIONS_TABLE_NAME = "heat_observations"
@@ -205,7 +210,7 @@ def _build_tri_agency_action_plan(
 def predict_point_heat_offset(
     latitude: float,
     longitude: float,
-    forecast_high_f: float = 102.0,
+    forecast_high_f: float = DANGEROUS_THRESHOLD_TEMP,
 ) -> dict[str, Any]:
     """Evaluate the Universal Vulnerability Index (UVI), spatial heat offset, and
     Tri-Agency response plan for any coordinate using ONLY
@@ -429,7 +434,7 @@ def predict_point_heat_offset(
 
 
 def recommend_emergency_deployments(
-    forecast_high_f: float = 102.0,
+    forecast_high_f: float = DANGEROUS_THRESHOLD_TEMP,
     num_units: int = 4,
     min_spacing_km: float = 1.2,
     priority_mode: str = "balanced",
@@ -613,7 +618,7 @@ def compare_deployment_sites(
     lat_b: float,
     lon_b: float,
     label_b: str,
-    forecast_high_f: float = 102.0,
+    forecast_high_f: float = DANGEROUS_THRESHOLD_TEMP,
 ) -> dict[str, Any]:
     """Compare two candidate deployment locations side-by-side using ONLY
     `qwiklabs-gcp-04-f8ba79cf4618.a4i_climate.Agent_Universal_Vulnaribility_Index`.
@@ -703,7 +708,9 @@ def compare_deployment_sites(
     }
 
 
-def get_city_uvi_and_infrastructure_summary(threshold_f: float = 105.0) -> dict[str, Any]:
+def get_city_uvi_and_infrastructure_summary(
+    threshold_f: float = DANGEROUS_THRESHOLD_TEMP,
+) -> dict[str, Any]:
     """Summarize city-wide Universal Vulnerability Index (UVI), NOAA 2023 Cooling Degree
     Days (CDD) energy stress, OpenStreetMap 1km urban density heat traps, and Public
     Library cooling center capacity across Dallas using ONLY
@@ -1559,3 +1566,146 @@ def audit_deployment_equity(top_n: int = 10) -> dict[str, Any]:
         },
         "top_uvi_priority_tracts": top_tracts,
     }
+
+
+def get_dallas_live_temperature(
+    latitude: float = DALLAS_DEFAULT_LAT,
+    longitude: float = DALLAS_DEFAULT_LON,
+) -> dict[str, Any]:
+    """Fetch real-time live temperature, heat index (feels-like), humidity, and
+    daily forecast highs in Fahrenheit for Dallas, TX (or a specific Dallas coordinate).
+
+    Uses the live Open-Meteo Weather API (keyless, NOAA GFS/HRRR blended feed) with
+    automatic fallback to the NOAA National Weather Service (NWS) API (`api.weather.gov`).
+
+    Args:
+        latitude: WGS84 latitude in Dallas (defaults to Downtown Dallas 32.7767).
+        longitude: WGS84 longitude in Dallas (defaults to Downtown Dallas -96.7970).
+
+    Returns:
+        Dictionary containing:
+        - `live_temperature_f`: Current air temperature (°F)
+        - `feels_like_heat_index_f`: Current apparent temperature / heat index (°F)
+        - `relative_humidity_pct`: Current relative humidity (%)
+        - `wind_speed_mph`: Current wind speed (mph)
+        - `today_forecast_high_f`: Today's forecast maximum temperature (°F)
+        - `tomorrow_forecast_high_f`: Tomorrow's forecast maximum temperature (°F)
+        - `dangerous_threshold_temp_f`: Configured dangerous heat threshold (°F)
+        - `is_dangerous_heat`: True if live or forecast high meets/exceeds `dangerous_threshold_temp_f`
+        - `recommended_forecast_high_f`: Value to pass into `recommend_emergency_deployments`
+          or `predict_point_heat_offset` for real-time simulation.
+    """
+    # Validate coordinate is in or near the Dallas metro area; default to Downtown Dallas if out of range
+    if not (32.40 <= latitude <= 33.20 and -97.20 <= longitude <= -96.40):
+        latitude = DALLAS_DEFAULT_LAT
+        longitude = DALLAS_DEFAULT_LON
+
+    # 1. Primary: Open-Meteo Live Weather API (NOAA HRRR / GFS real-time feed)
+    open_meteo_url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": round(latitude, 4),
+        "longitude": round(longitude, 4),
+        "current": "temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m",
+        "daily": "temperature_2m_max,temperature_2m_min,apparent_temperature_max",
+        "temperature_unit": "fahrenheit",
+        "wind_speed_unit": "mph",
+        "timezone": "America/Chicago",
+        "forecast_days": 3,
+    }
+    try:
+        resp = requests.get(open_meteo_url, params=params, timeout=8)
+        resp.raise_for_status()
+        data = resp.json()
+        current = data.get("current", {})
+        daily = data.get("daily", {})
+
+        live_temp_f = float(current.get("temperature_2m", 0.0))
+        feels_like_f = float(current.get("apparent_temperature", live_temp_f))
+        humidity_pct = int(current.get("relative_humidity_2m", 0))
+        wind_mph = float(current.get("wind_speed_10m", 0.0))
+
+        daily_max = daily.get("temperature_2m_max", [])
+        daily_min = daily.get("temperature_2m_min", [])
+        daily_feels_max = daily.get("apparent_temperature_max", [])
+        daily_dates = daily.get("time", [])
+
+        today_high_f = float(daily_max[0]) if len(daily_max) > 0 else live_temp_f
+        tomorrow_high_f = float(daily_max[1]) if len(daily_max) > 1 else today_high_f
+
+        forecast_days = []
+        for idx, date_str in enumerate(daily_dates):
+            forecast_days.append(
+                {
+                    "date": date_str,
+                    "max_temp_f": round(float(daily_max[idx]), 1) if idx < len(daily_max) else None,
+                    "min_temp_f": round(float(daily_min[idx]), 1) if idx < len(daily_min) else None,
+                    "max_heat_index_f": (
+                        round(float(daily_feels_max[idx]), 1)
+                        if idx < len(daily_feels_max)
+                        else None
+                    ),
+                }
+            )
+
+        recommended_high_f = round(max(live_temp_f, today_high_f, tomorrow_high_f), 1)
+        is_dangerous = recommended_high_f >= DANGEROUS_THRESHOLD_TEMP
+        return {
+            "status": "ok",
+            "source": "Open-Meteo Live Weather API (NOAA HRRR/GFS feed)",
+            "city": "Dallas, TX",
+            "coordinates": {"latitude": round(latitude, 4), "longitude": round(longitude, 4)},
+            "observed_at_local": current.get("time"),
+            "timezone": data.get("timezone", "America/Chicago"),
+            "live_temperature_f": round(live_temp_f, 1),
+            "feels_like_heat_index_f": round(feels_like_f, 1),
+            "relative_humidity_pct": humidity_pct,
+            "wind_speed_mph": round(wind_mph, 1),
+            "today_forecast_high_f": round(today_high_f, 1),
+            "tomorrow_forecast_high_f": round(tomorrow_high_f, 1),
+            "dangerous_threshold_temp_f": DANGEROUS_THRESHOLD_TEMP,
+            "is_dangerous_heat": is_dangerous,
+            "recommended_forecast_high_f": recommended_high_f,
+            "daily_forecast_3d": forecast_days,
+            "simulation_note": (
+                f"Live Dallas temperature is {live_temp_f:.1f}°F (feels like {feels_like_f:.1f}°F, "
+                f"today's high {today_high_f:.1f}°F, tomorrow's high {tomorrow_high_f:.1f}°F; "
+                f"dangerous threshold: {DANGEROUS_THRESHOLD_TEMP:.1f}°F). "
+                f"Pass `forecast_high_f={recommended_high_f}` into `predict_point_heat_offset` or "
+                f"`recommend_emergency_deployments` to add each census tract's urban heat island "
+                f"offset (`heat_offset_f`) on top of the live regional temperature."
+            ),
+        }
+    except Exception as open_meteo_err:
+        # 2. Fallback: NOAA National Weather Service (NWS) API
+        try:
+            headers = {"User-Agent": "(DallasUrbanHeatPlanner, agents-for-impact-2026)"}
+            pts_resp = requests.get(
+                f"https://api.weather.gov/points/{latitude:.4f},{longitude:.4f}",
+                headers=headers,
+                timeout=8,
+            )
+            pts_resp.raise_for_status()
+            forecast_url = pts_resp.json()["properties"]["forecast"]
+            fc_resp = requests.get(forecast_url, headers=headers, timeout=8)
+            fc_resp.raise_for_status()
+            periods = fc_resp.json()["properties"]["periods"]
+            current_period = periods[0] if periods else {}
+            temp_f = float(current_period.get("temperature", 95.0))
+            return {
+                "status": "ok",
+                "source": "NOAA National Weather Service API (api.weather.gov)",
+                "city": "Dallas, TX",
+                "coordinates": {"latitude": round(latitude, 4), "longitude": round(longitude, 4)},
+                "live_temperature_f": round(temp_f, 1),
+                "short_forecast": current_period.get("shortForecast"),
+                "wind_speed": current_period.get("windSpeed"),
+                "recommended_forecast_high_f": round(temp_f, 1),
+            }
+        except Exception as nws_err:
+            return {
+                "status": "error",
+                "city": "Dallas, TX",
+                "error": f"Live weather fetch failed (Open-Meteo: {open_meteo_err}; NWS: {nws_err})",
+                "fallback_forecast_high_f": 100.0,
+            }
+
