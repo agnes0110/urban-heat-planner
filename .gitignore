@@ -22,3 +22,8 @@ Thumbs.db
 # Local data
 *.parquet
 *.csv.gz
+
+# ADK
+.adk/
+agent/.adk/
+
