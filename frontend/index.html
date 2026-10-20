@@ -62,9 +62,10 @@
       </h1>
     </div>
     <div class="flex items-center gap-2 text-xs text-slate-400">
-      <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-        🟢 ADK Agent Connected
-      </span>
+      <button id="adk-status-btn" onclick="openKeyModal()" class="px-2.5 py-1 rounded-full text-[11px] font-bold flex items-center gap-1.5 transition-all cursor-pointer bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500/30 shadow-sm" title="Click to view ADK connection and connect Gemini API key">
+        <span id="adk-status-dot" class="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+        <span id="adk-status-text">ADK Rules Mode (Connect Key)</span>
+      </button>
       <span><code class="text-orange-300">dallas_heat_emergency_commander</code> · <code class="text-sky-300">Agent_Universal_Vulnaribility_Index</code></span>
     </div>
   </header>
@@ -628,7 +629,7 @@
         .openOn(map);
     }
 
-    function appendMessage(role, markdownText) {
+    function appendMessage(role, markdownText, source) {
       const container = document.getElementById("chat-messages");
       const div = document.createElement("div");
       if (role === "user") {
@@ -636,7 +637,13 @@
         div.textContent = markdownText;
       } else {
         div.className = "mr-4 bg-slate-800/90 border border-slate-700 rounded-xl p-3.5 text-xs text-slate-200 prose-chat leading-relaxed";
-        div.innerHTML = marked.parse(markdownText);
+        let badgeHtml = "";
+        if (source === "adk_live_llm") {
+          badgeHtml = `<div class="flex items-center justify-between text-[10px] text-slate-400 mb-2 border-b border-slate-700/60 pb-1.5"><span class="flex items-center gap-1 font-semibold text-slate-300">🤖 Dallas Emergency Commander</span><span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">🟢 ADK Live LLM · Gemini 2.5</span></div>`;
+        } else if (source === "adk_grounded_fallback") {
+          badgeHtml = `<div class="flex items-center justify-between text-[10px] text-slate-400 mb-2 border-b border-slate-700/60 pb-1.5"><span class="flex items-center gap-1 font-semibold text-slate-300">🤖 Dallas Emergency Commander</span><span class="px-2 py-0.5 rounded-full text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">🟡 BigQuery Grounded Rules</span></div>`;
+        }
+        div.innerHTML = badgeHtml + marked.parse(markdownText);
       }
       container.appendChild(div);
       container.scrollTop = container.scrollHeight;
@@ -662,11 +669,14 @@
       const trucks = Math.max(0, parseInt(document.getElementById("trucks-input").value, 10) || 0);
       const wellness = Math.max(0, parseInt(document.getElementById("wellness-input").value, 10) || 0);
 
+      const isLive = currentPlan && currentPlan.adk_live_llm;
       const chatContainer = document.getElementById("chat-messages");
       const loadingDiv = document.createElement("div");
       loadingDiv.id = "chat-loading-indicator";
       loadingDiv.className = "mr-4 bg-slate-800/60 border border-slate-700/60 rounded-xl p-3 text-xs text-slate-400 italic flex items-center gap-2";
-      loadingDiv.innerHTML = `<span class="inline-block animate-pulse">⏳</span> Synthesizing BigQuery microclimate data...`;
+      loadingDiv.innerHTML = isLive
+        ? `<span class="inline-block animate-pulse">🤖</span> Running ADK Multi-Agent Commander with Gemini 2.5 Flash...`
+        : `<span class="inline-block animate-pulse">⏳</span> Synthesizing BigQuery microclimate data...`;
       chatContainer.appendChild(loadingDiv);
       chatContainer.scrollTop = chatContainer.scrollHeight;
 
@@ -690,11 +700,13 @@
         if (loadEl) loadEl.remove();
 
         currentPlan = data.plan;
+        updateAdkBadge(currentPlan.adk_live_llm);
+
         if (data.highlight_tract_id) {
           selectedTractId = data.highlight_tract_id;
           isCardOpen = true;
         }
-        appendMessage("agent", data.reply);
+        appendMessage("agent", data.reply, data.source);
         renderAll();
         const n = currentPlan.neighborhoods.find((item) => item.id === selectedTractId);
         if (n) {
@@ -707,12 +719,214 @@
       }
     }
 
+    function updateAdkBadge(isLive) {
+      const btn = document.getElementById("adk-status-btn");
+      const dot = document.getElementById("adk-status-dot");
+      const text = document.getElementById("adk-status-text");
+      if (!btn || !dot || !text) return;
+      if (isLive) {
+        btn.className = "px-2.5 py-1 rounded-full text-[11px] font-bold flex items-center gap-1.5 transition-all cursor-pointer bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30 shadow-sm";
+        dot.className = "w-2 h-2 rounded-full bg-emerald-400";
+        text.textContent = "ADK Live LLM (Gemini 2.5 Active)";
+      } else {
+        btn.className = "px-2.5 py-1 rounded-full text-[11px] font-bold flex items-center gap-1.5 transition-all cursor-pointer bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500/30 shadow-sm";
+        dot.className = "w-2 h-2 rounded-full bg-amber-400 animate-pulse";
+        text.textContent = "ADK Rules Mode (Connect Key)";
+      }
+    }
+
+    async function openKeyModal() {
+      const modal = document.getElementById("key-modal");
+      if (!modal) return;
+      modal.classList.remove("hidden");
+      const fb = document.getElementById("modal-feedback");
+      if (fb) fb.classList.add("hidden");
+
+      try {
+        const res = await fetch("/api/agent-status");
+        if (res.ok) {
+          const st = await res.json();
+          const modalStatus = document.getElementById("modal-status-text");
+          if (modalStatus) {
+            if (st.adk_live_llm) {
+              modalStatus.innerHTML = `<span class="text-emerald-300 font-bold">🟢 Live Reasoning Active (Gemini 2.5 Flash)</span>`;
+            } else {
+              modalStatus.innerHTML = `<span class="text-amber-300 font-bold">🟡 Offline Fallback (BigQuery Rules Grounded)</span>`;
+            }
+          }
+        }
+      } catch (e) {
+        console.warn("Status check error:", e);
+      }
+    }
+
+    function closeKeyModal() {
+      const modal = document.getElementById("key-modal");
+      if (modal) modal.classList.add("hidden");
+    }
+
+    function toggleKeyVisibility() {
+      const input = document.getElementById("api-key-input");
+      const btn = document.getElementById("toggle-visibility-btn");
+      if (!input) return;
+      if (input.type === "password") {
+        input.type = "text";
+        if (btn) btn.textContent = "Hide";
+      } else {
+        input.type = "password";
+        if (btn) btn.textContent = "Show";
+      }
+    }
+
+    async function saveApiKey() {
+      const input = document.getElementById("api-key-input");
+      const saveBtn = document.getElementById("save-key-btn");
+      const fb = document.getElementById("modal-feedback");
+      const key = input ? input.value.trim() : "";
+
+      if (!key) {
+        if (fb) {
+          fb.className = "mb-4 p-2.5 rounded-lg text-xs bg-red-500/20 text-red-300 border border-red-500/40 block";
+          fb.textContent = "Please enter a valid Gemini API key.";
+        }
+        return;
+      }
+
+      saveBtn.disabled = true;
+      saveBtn.innerHTML = `<span>⏳ Verifying with Gemini API...</span>`;
+      if (fb) fb.classList.add("hidden");
+
+      try {
+        const res = await fetch("/api/config-key", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ api_key: key }),
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          if (fb) {
+            fb.className = "mb-4 p-2.5 rounded-lg text-xs bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 block";
+            fb.textContent = data.message || "Connected to Google Gemini successfully!";
+          }
+          updateAdkBadge(true);
+          if (currentPlan) currentPlan.adk_live_llm = true;
+          input.value = "";
+          setTimeout(() => {
+            closeKeyModal();
+            appendMessage("agent", "🤖 **Google ADK Live Reasoning Connected**: Dallas Emergency Commander and all 4 sub-agents (`historic_heat_data_agent`, `microclimate_risk_agent`, `triage_dispatch_agent`, `equity_audit_agent`) are now reasoning live via **Gemini 2.5 Flash**!", "adk_live_llm");
+          }, 1200);
+        } else {
+          if (fb) {
+            fb.className = "mb-4 p-2.5 rounded-lg text-xs bg-red-500/20 text-red-300 border border-red-500/40 block";
+            fb.textContent = data.message || "Verification failed. Please check your API key.";
+          }
+        }
+      } catch (err) {
+        if (fb) {
+          fb.className = "mb-4 p-2.5 rounded-lg text-xs bg-red-500/20 text-red-300 border border-red-500/40 block";
+          fb.textContent = `Network error: ${err.message}`;
+        }
+      } finally {
+        saveBtn.disabled = false;
+        saveBtn.innerHTML = `<span>Connect &amp; Test</span>`;
+      }
+    }
+
+    async function clearApiKey() {
+      const fb = document.getElementById("modal-feedback");
+      try {
+        const res = await fetch("/api/clear-key", { method: "POST" });
+        const data = await res.json();
+        if (fb) {
+          fb.className = "mb-4 p-2.5 rounded-lg text-xs bg-amber-500/20 text-amber-300 border border-amber-500/40 block";
+          fb.textContent = "Reverted to offline deterministic BigQuery rules mode.";
+        }
+        updateAdkBadge(false);
+        if (currentPlan) currentPlan.adk_live_llm = false;
+        const modalStatus = document.getElementById("modal-status-text");
+        if (modalStatus) {
+          modalStatus.innerHTML = `<span class="text-amber-300 font-bold">🟡 Offline Fallback (BigQuery Rules Grounded)</span>`;
+        }
+      } catch (err) {
+        if (fb) {
+          fb.className = "mb-4 p-2.5 rounded-lg text-xs bg-red-500/20 text-red-300 border border-red-500/40 block";
+          fb.textContent = `Error: ${err.message}`;
+        }
+      }
+    }
+
     window.addEventListener("DOMContentLoaded", async () => {
       initMap();
       const res = await fetch("/api/initial-data");
       currentPlan = await res.json();
+      updateAdkBadge(currentPlan.adk_live_llm);
       renderAll();
     });
   </script>
+
+  <!-- ADK Agent & Gemini API Key Modal -->
+  <div id="key-modal" class="hidden fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl max-w-lg w-full p-6 text-slate-200 relative">
+      <button onclick="closeKeyModal()" class="absolute top-4 right-4 text-slate-400 hover:text-white text-lg font-bold">✕</button>
+      
+      <div class="flex items-center gap-2.5 mb-4">
+        <div class="w-8 h-8 rounded-lg bg-orange-500/20 border border-orange-500/40 flex items-center justify-center text-lg">🤖</div>
+        <div>
+          <h3 class="text-base font-bold text-white">Google ADK Multi-Agent Connection</h3>
+          <p class="text-xs text-slate-400">Dallas Emergency Heatwave Commander · Track 1</p>
+        </div>
+      </div>
+
+      <div class="bg-slate-950/80 rounded-lg p-3.5 border border-slate-800 text-xs space-y-2 mb-4">
+        <div class="flex justify-between items-center">
+          <span class="text-slate-400">Root Agent:</span>
+          <span class="font-mono text-orange-300 font-semibold">dallas_heat_emergency_commander</span>
+        </div>
+        <div class="flex justify-between items-center">
+          <span class="text-slate-400">Sub-Agents:</span>
+          <span class="text-sky-300 text-[11px]">4 active (Historic, Microclimate, Triage, Equity)</span>
+        </div>
+        <div class="flex justify-between items-center">
+          <span class="text-slate-400">ADK Framework:</span>
+          <span class="text-slate-300 font-mono">google-adk 2.12.0</span>
+        </div>
+        <div class="flex justify-between items-center border-t border-slate-800 pt-2">
+          <span class="text-slate-400">Live Status:</span>
+          <span id="modal-status-text" class="font-bold text-amber-300">🟡 Rules Mode (Offline BigQuery Grounded)</span>
+        </div>
+      </div>
+
+      <div class="mb-4">
+        <label class="block text-xs font-semibold text-slate-300 mb-1.5">
+          Google Gemini API Key:
+        </label>
+        <div class="relative">
+          <input id="api-key-input" type="password" placeholder="AIzaSy..." class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-orange-500 font-mono pr-16" />
+          <button id="toggle-visibility-btn" type="button" onclick="toggleKeyVisibility()" class="absolute right-2 top-2 text-[10px] text-slate-400 hover:text-white px-1.5 py-0.5 rounded bg-slate-800">
+            Show
+          </button>
+        </div>
+        <p class="text-[11px] text-slate-400 mt-1.5">
+          Get a free Gemini API key from <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" class="text-sky-400 underline hover:text-sky-300">Google AI Studio ↗</a>. Keys are stored in your local <code class="text-slate-300">.env</code> file (gitignored).
+        </p>
+      </div>
+
+      <div id="modal-feedback" class="hidden mb-4 p-2.5 rounded-lg text-xs"></div>
+
+      <div class="flex items-center justify-between gap-2 pt-2 border-t border-slate-800">
+        <button id="clear-key-btn" onclick="clearApiKey()" class="px-3 py-1.5 rounded-lg text-xs font-medium text-slate-400 hover:text-red-400 hover:bg-slate-800/80 transition">
+          Revert to Offline Mode
+        </button>
+        <div class="flex gap-2">
+          <button onclick="closeKeyModal()" class="px-3.5 py-1.5 rounded-lg text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-300 transition">
+            Close
+          </button>
+          <button id="save-key-btn" onclick="saveApiKey()" class="px-4 py-1.5 rounded-lg text-xs font-semibold bg-orange-600 hover:bg-orange-500 text-white shadow-lg transition flex items-center gap-1.5">
+            <span>Connect &amp; Test</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
 </body>
 </html>

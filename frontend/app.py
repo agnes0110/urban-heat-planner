@@ -12,6 +12,17 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+# Load .env file automatically if present
+try:
+    from dotenv import load_dotenv
+    load_dotenv(REPO_ROOT / ".env")
+except ImportError:
+    pass
+
+# Synchronize GEMINI_API_KEY into GOOGLE_API_KEY for ADK / google-genai
+if not os.environ.get("GOOGLE_API_KEY") and os.environ.get("GEMINI_API_KEY"):
+    os.environ["GOOGLE_API_KEY"] = os.environ["GEMINI_API_KEY"]
+
 try:
     from fastapi import FastAPI
     from fastapi.responses import HTMLResponse, JSONResponse
@@ -114,19 +125,27 @@ AGENT_TOOLS, HAS_BIGQUERY_CLIENT = _load_agent_tools_module()
 
 # Attempt to load live ADK `root_agent` (`dallas_heat_emergency_commander`) from `agent/agent.py`
 ADK_ROOT_AGENT = None
-HAS_ADK_RUNTIME = False
 try:
     from agent.agent import root_agent as _loaded_root_agent
     from google.adk.runners import InMemoryRunner
     from google.genai import types as genai_types
 
     ADK_ROOT_AGENT = _loaded_root_agent
-    HAS_ADK_RUNTIME = bool(
-        os.environ.get("GOOGLE_API_KEY") or os.environ.get("GOOGLE_GENAI_USE_VERTEXAI")
-    )
-except Exception:
+except Exception as _agent_err:
     ADK_ROOT_AGENT = None
-    HAS_ADK_RUNTIME = False
+
+
+def is_adk_live_runtime_active() -> bool:
+    """Dynamically checks if ADK root_agent is loaded AND valid Gemini credentials exist."""
+    return (ADK_ROOT_AGENT is not None) and bool(
+        os.environ.get("GOOGLE_API_KEY")
+        or os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GOOGLE_GENAI_USE_VERTEXAI")
+    )
+
+
+# Backward-compatible property alias
+HAS_ADK_RUNTIME = is_adk_live_runtime_active()
 
 PROJECT_ID = getattr(AGENT_TOOLS, "PROJECT_ID", os.environ.get("GOOGLE_CLOUD_PROJECT", "qwiklabs-gcp-04-f8ba79cf4618"))
 DATASET = getattr(AGENT_TOOLS, "DATASET_ID", os.environ.get("BQ_DATASET", "a4i_climate"))
@@ -423,6 +442,10 @@ class ChatRequest(BaseModel):
     selected_tract_id: Optional[str] = None
 
 
+class KeyConfigRequest(BaseModel):
+    api_key: str
+
+
 def compute_dispatch_plan(
     budget: int,
     hydration_trucks: int,
@@ -538,7 +561,9 @@ def compute_dispatch_plan(
     return {
         "baseline": DALLAS_BASELINE,
         "agent_connected": True,
-        "adk_live_llm": HAS_ADK_RUNTIME,
+        "adk_agent_loaded": ADK_ROOT_AGENT is not None,
+        "adk_live_llm": is_adk_live_runtime_active(),
+        "has_api_key": bool(os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")),
         "station_temp_f": station_temp_f,
         "budget": budget,
         "requested_trucks": hydration_trucks,
@@ -573,40 +598,38 @@ def _format_ui_dispatch_context(plan: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _try_run_live_adk_agent(message: str, plan: Dict[str, Any]) -> Optional[str]:
+async def _try_run_live_adk_agent(message: str, plan: Dict[str, Any]) -> Optional[str]:
     """If `google-adk` and Gemini credentials are active, runs `agent.agent.root_agent`
     (`dallas_heat_emergency_commander`) with the injected UI dispatch state.
     """
-    if not HAS_ADK_RUNTIME or ADK_ROOT_AGENT is None:
+    if not is_adk_live_runtime_active() or ADK_ROOT_AGENT is None:
         return None
     try:
         prompt_with_state = f"{_format_ui_dispatch_context(plan)}\n\nUser Question: {message}"
 
-        async def _run():
-            runner = InMemoryRunner(agent=ADK_ROOT_AGENT, app_name="dallas_heat_planner")
-            session = await runner.session_service.create_session(
-                app_name="dallas_heat_planner", user_id="planner_ui"
-            )
-            content = genai_types.Content(
-                role="user", parts=[genai_types.Part.from_text(text=prompt_with_state)]
-            )
-            chunks: List[str] = []
-            async for event in runner.run_async(
-                user_id="planner_ui", session_id=session.id, new_message=content
-            ):
-                if event.content and event.content.parts:
-                    for part in event.content.parts:
-                        if getattr(part, "text", None):
-                            chunks.append(part.text)
-            return "\n".join(chunks).strip()
-
-        reply = asyncio.run(_run())
+        runner = InMemoryRunner(agent=ADK_ROOT_AGENT, app_name="dallas_heat_planner")
+        session = await runner.session_service.create_session(
+            app_name="dallas_heat_planner", user_id="planner_ui"
+        )
+        content = genai_types.Content(
+            role="user", parts=[genai_types.Part.from_text(text=prompt_with_state)]
+        )
+        chunks: List[str] = []
+        async for event in runner.run_async(
+            user_id="planner_ui", session_id=session.id, new_message=content
+        ):
+            if event.content and event.content.parts:
+                for part in event.content.parts:
+                    if getattr(part, "text", None):
+                        chunks.append(part.text)
+        reply = "\n".join(chunks).strip()
         return reply if reply else None
-    except Exception:
+    except Exception as e:
+        print(f"[ADK Live Execution Notice] {type(e).__name__}: {e}")
         return None
 
 
-def build_chat_response(payload: Dict[str, Any]) -> Dict[str, Any]:
+async def build_chat_response(payload: Dict[str, Any]) -> Dict[str, Any]:
     message = str(payload.get("message", ""))
     budget = int(payload.get("budget", 10000))
     hydration_trucks = int(payload.get("hydration_trucks", 2))
@@ -637,12 +660,13 @@ def build_chat_response(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     # 1. If live ADK LLM runtime is active (and not just a silent slider sync), run `agent.agent.root_agent`
     if q != "update daily dispatch plan":
-        adk_reply = _try_run_live_adk_agent(message, plan)
+        adk_reply = await _try_run_live_adk_agent(message, plan)
         if adk_reply:
             return {
                 "reply": adk_reply,
                 "highlight_tract_id": highlight_id,
                 "plan": plan,
+                "source": "adk_live_llm",
             }
 
     # 2. Comprehensive Database-Grounded Intent Routing (Exclusively querying/explaining the 3 BigQuery tables)
@@ -812,6 +836,7 @@ def build_chat_response(payload: Dict[str, Any]) -> Dict[str, Any]:
         "reply": reply,
         "highlight_tract_id": highlight_id,
         "plan": plan,
+        "source": "adk_grounded_fallback",
     }
 
 
@@ -822,7 +847,80 @@ if HAS_FASTAPI:
 
     @app.post("/api/chat")
     async def chat_endpoint(req: ChatRequest):
-        return JSONResponse(build_chat_response(req.model_dump() if hasattr(req, "model_dump") else req.__dict__))
+        return JSONResponse(await build_chat_response(req.model_dump() if hasattr(req, "model_dump") else req.__dict__))
+
+    @app.get("/api/agent-status")
+    async def agent_status_endpoint():
+        return JSONResponse({
+            "adk_agent_loaded": ADK_ROOT_AGENT is not None,
+            "adk_live_llm": is_adk_live_runtime_active(),
+            "has_api_key": bool(os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")),
+            "model": getattr(AGENT_TOOLS, "ADK_MODEL", "gemini-2.5-flash"),
+            "root_agent": "dallas_heat_emergency_commander",
+            "sub_agents": DALLAS_BASELINE["sub_agents"],
+            "has_bigquery": HAS_BIGQUERY_CLIENT,
+            "table": UVI_TABLE_NAME,
+        })
+
+    @app.post("/api/config-key")
+    async def config_key_endpoint(req: KeyConfigRequest):
+        key = str(getattr(req, "api_key", "")).strip()
+        if not key:
+            return JSONResponse({"success": False, "message": "API key cannot be empty."}, status_code=400)
+
+        # Validate with Google Gemini API
+        try:
+            from google.genai import Client
+            test_client = Client(api_key=key)
+            res = test_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents="Dallas heat emergency test",
+            )
+            _ = res.text
+        except Exception as e:
+            err_msg = str(e)
+            if "API_KEY_INVALID" in err_msg or "400" in err_msg or "INVALID_ARGUMENT" in err_msg:
+                clean_err = "Invalid API key. Please verify your key at https://aistudio.google.com/app/apikey"
+            else:
+                clean_err = f"Gemini connection error: {err_msg}"
+            return JSONResponse({"success": False, "message": clean_err}, status_code=400)
+
+        os.environ["GOOGLE_API_KEY"] = key
+        os.environ["GEMINI_API_KEY"] = key
+
+        # Persist to local .env file (safely gitignored)
+        try:
+            env_path = REPO_ROOT / ".env"
+            lines = []
+            if env_path.exists():
+                lines = [l for l in env_path.read_text(encoding="utf-8").splitlines() if not l.startswith("GOOGLE_API_KEY=") and not l.startswith("GEMINI_API_KEY=")]
+            lines.append(f"GOOGLE_API_KEY={key}")
+            env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except Exception as env_err:
+            print(f"Warning persisting to .env: {env_err}")
+
+        return JSONResponse({
+            "success": True,
+            "adk_live_llm": True,
+            "message": "✅ Gemini API key verified! Google ADK live multi-agent reasoning is now ACTIVE with gemini-2.5-flash."
+        })
+
+    @app.post("/api/clear-key")
+    async def clear_key_endpoint():
+        os.environ.pop("GOOGLE_API_KEY", None)
+        os.environ.pop("GEMINI_API_KEY", None)
+        try:
+            env_path = REPO_ROOT / ".env"
+            if env_path.exists():
+                lines = [l for l in env_path.read_text(encoding="utf-8").splitlines() if not l.startswith("GOOGLE_API_KEY=") and not l.startswith("GEMINI_API_KEY=")]
+                env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except Exception as env_err:
+            print(f"Warning updating .env: {env_err}")
+        return JSONResponse({
+            "success": True,
+            "adk_live_llm": False,
+            "message": "Gemini key removed. Reverted to offline grounded BigQuery rules mode."
+        })
 
     @app.get("/", response_class=HTMLResponse)
     async def serve_ui():
@@ -842,6 +940,17 @@ class LocalPreviewHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path.startswith("/api/initial-data"):
             self._send_json(compute_dispatch_plan(budget=10000, hydration_trucks=2, wellness_teams=2))
+        elif self.path.startswith("/api/agent-status"):
+            self._send_json({
+                "adk_agent_loaded": ADK_ROOT_AGENT is not None,
+                "adk_live_llm": is_adk_live_runtime_active(),
+                "has_api_key": bool(os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")),
+                "model": getattr(AGENT_TOOLS, "ADK_MODEL", "gemini-2.5-flash"),
+                "root_agent": "dallas_heat_emergency_commander",
+                "sub_agents": DALLAS_BASELINE["sub_agents"],
+                "has_bigquery": HAS_BIGQUERY_CLIENT,
+                "table": UVI_TABLE_NAME,
+            })
         else:
             html_path = Path(__file__).parent / "index.html"
             raw = html_path.read_bytes()
@@ -852,11 +961,47 @@ class LocalPreviewHandler(BaseHTTPRequestHandler):
             self.wfile.write(raw)
 
     def do_POST(self) -> None:
-        if self.path.startswith("/api/chat"):
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
+        try:
             payload = json.loads(body)
-            self._send_json(build_chat_response(payload))
+        except Exception:
+            payload = {}
+
+        if self.path.startswith("/api/chat"):
+            self._send_json(asyncio.run(build_chat_response(payload)))
+        elif self.path.startswith("/api/config-key"):
+            key = str(payload.get("api_key", "")).strip()
+            if not key:
+                self._send_json({"success": False, "message": "API key cannot be empty."}, status=400)
+                return
+            try:
+                from google.genai import Client
+                test_client = Client(api_key=key)
+                res = test_client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents="Dallas heat emergency test",
+                )
+                _ = res.text
+            except Exception as e:
+                self._send_json({"success": False, "message": f"Gemini connection error: {e}"}, status=400)
+                return
+            os.environ["GOOGLE_API_KEY"] = key
+            os.environ["GEMINI_API_KEY"] = key
+            try:
+                env_path = REPO_ROOT / ".env"
+                lines = []
+                if env_path.exists():
+                    lines = [l for l in env_path.read_text(encoding="utf-8").splitlines() if not l.startswith("GOOGLE_API_KEY=") and not l.startswith("GEMINI_API_KEY=")]
+                lines.append(f"GOOGLE_API_KEY={key}")
+                env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            except Exception:
+                pass
+            self._send_json({"success": True, "adk_live_llm": True, "message": "Gemini API key verified!"})
+        elif self.path.startswith("/api/clear-key"):
+            os.environ.pop("GOOGLE_API_KEY", None)
+            os.environ.pop("GEMINI_API_KEY", None)
+            self._send_json({"success": True, "adk_live_llm": False, "message": "Gemini key removed."})
         else:
             self._send_json({"error": "Not found"}, status=404)
 
