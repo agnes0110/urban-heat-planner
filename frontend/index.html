@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dallas Daily Heat Dispatch Planner</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    body {
+      background-color: #0b0f19;
+      color: #f1f5f9;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    #map {
+      height: 100%;
+      width: 100%;
+      background: #111827;
+    }
+    /* Custom dark floating callout card next to the neighborhood on the map */
+    .leaflet-popup-content-wrapper {
+      background: rgba(15, 23, 42, 0.96) !important;
+      color: #f8fafc !important;
+      border: 1px solid rgba(251, 146, 60, 0.65);
+      border-radius: 12px !important;
+      box-shadow: 0 12px 28px rgba(0, 0, 0, 0.65) !important;
+      padding: 2px !important;
+    }
+    .leaflet-popup-tip {
+      background: rgba(15, 23, 42, 0.96) !important;
+    }
+    .leaflet-popup-content {
+      margin: 10px 12px !important;
+      line-height: 1.4 !important;
+    }
+    /* Hide default number input arrows for cleaner look */
+    input[type="number"]::-webkit-inner-spin-button,
+    input[type="number"]::-webkit-outer-spin-button {
+      -webkit-appearance: none;
+      margin: 0;
+    }
+    input[type="number"] {
+      -moz-appearance: textfield;
+    }
+    .prose-chat p { margin-bottom: 0.45rem; }
+    .prose-chat ul, .prose-chat ol { margin-left: 1.2rem; margin-bottom: 0.45rem; list-style: disc; }
+    .prose-chat strong { color: #fdba74; }
+  </style>
+</head>
+<body class="h-screen flex flex-col overflow-hidden select-none">
+
+  <!-- SIMPLE CLEAN HEADER -->
+  <header class="h-12 bg-slate-900 border-b border-slate-800 px-5 flex items-center justify-between shrink-0">
+    <div class="flex items-center gap-3">
+      <span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-orange-500/20 text-orange-400 border border-orange-500/30">
+        ⚡ Daily Dispatch
+      </span>
+      <h1 class="text-sm font-bold text-white tracking-tight">
+        Dallas Urban Heat Planner — Hydration Trucks &amp; Senior Wellness Checks
+      </h1>
+    </div>
+    <div class="text-xs text-slate-400">
+      BigQuery ML <code class="text-orange-300">heat_offset_model</code> · Dallas (`a4i_climate`)
+    </div>
+  </header>
+
+  <!-- MAIN SPLIT VIEW -->
+  <main class="flex-1 flex overflow-hidden">
+
+    <!-- ================= LEFT PANEL (60%): COMPACT TEMP BOX + MAP WITH FLOATING RANKING & EXPLANATION ================= -->
+    <section class="w-[60%] h-full flex flex-col border-r border-slate-800 bg-slate-950">
+
+      <!-- Compact 2-Stat Temperature Box -->
+      <div class="px-5 py-3 bg-slate-900/90 border-b border-slate-800 shrink-0 flex items-center justify-between gap-4">
+        <div class="min-w-0">
+          <div class="flex items-center gap-2">
+            <span id="selected-warning-badge" class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-red-500/20 text-red-300 border border-red-500/40">
+              EXTREME HEAT WARNING
+            </span>
+          </div>
+          <h2 id="selected-name" class="text-base font-bold text-white truncate mt-1">
+            South Dallas / Fair Park
+          </h2>
+          <p id="selected-intersection" class="text-xs text-slate-400 truncate">
+            MLK Jr Blvd &amp; S Malcolm X Blvd
+          </p>
+        </div>
+
+        <!-- Station Temp vs Predicted Neighborhood Temp Box -->
+        <div class="flex items-center gap-3 shrink-0">
+          <div class="bg-slate-950/90 border border-slate-800 rounded-lg px-3.5 py-2 text-right">
+            <div class="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">
+              📡 Station Temp
+            </div>
+            <div id="station-temp-val" class="text-xl font-extrabold text-sky-400 leading-tight mt-0.5">
+              102.0°F
+            </div>
+            <div class="text-[10px] text-slate-500">DFW Regional</div>
+          </div>
+
+          <div class="bg-orange-950/30 border border-orange-500/40 rounded-lg px-3.5 py-2 text-right">
+            <div class="flex items-center justify-end gap-1.5">
+              <span class="text-[10px] uppercase tracking-wider text-orange-300 font-semibold">
+                🌡️ Predicted Area Temp
+              </span>
+              <span id="offset-pill" class="px-1.5 py-0.2 rounded text-[10px] font-bold bg-orange-500 text-slate-950">
+                +4.8°F
+              </span>
+            </div>
+            <div id="predicted-temp-val" class="text-xl font-extrabold text-orange-400 leading-tight mt-0.5">
+              106.8°F
+            </div>
+            <div id="selected-demographics" class="text-[10px] text-slate-300">
+              1,322 Seniors · 18.9% No Car
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Interactive Map Area -->
+      <div class="flex-1 relative">
+        <div id="map"></div>
+
+        <!-- Floating Immediate Action Ranking Overlay on the Right Side of the Map -->
+        <div class="absolute top-3 right-3 z-[500] w-72 bg-slate-900/92 backdrop-blur-md border border-slate-700/80 rounded-xl p-3 shadow-2xl">
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-[11px] uppercase tracking-wider text-orange-300 font-bold">
+              🚨 Immediate Action Ranking
+            </span>
+            <span class="text-[10px] text-slate-400">Click to inspect / close</span>
+          </div>
+          <div id="ranking-list" class="space-y-1.5"></div>
+        </div>
+
+        <!-- Simple Map Legend -->
+        <div class="absolute bottom-4 left-4 z-[500] bg-slate-900/90 backdrop-blur border border-slate-800 rounded-lg px-3 py-2 text-[11px] flex items-center gap-4 shadow-lg">
+          <span class="flex items-center gap-1.5 text-slate-300">
+            <span class="w-2.5 h-2.5 rounded-sm bg-red-500 inline-block"></span> Extreme Heat (+4°F to +5°F)
+          </span>
+          <span class="flex items-center gap-1.5 text-slate-300">
+            <span class="w-2.5 h-2.5 rounded-sm bg-amber-500 inline-block"></span> Elevated (+3°F to +4°F)
+          </span>
+          <span class="flex items-center gap-1.5 text-slate-300">
+            <span class="w-2.5 h-2.5 rounded-sm bg-emerald-500 inline-block"></span> Low Risk (+0.8°F)
+          </span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= RIGHT PANEL (40%): BUDGET CONTROLS STACKED DIRECTLY ABOVE FULL-HEIGHT CHATBOT ================= -->
+    <section class="w-[40%] h-full flex flex-col bg-slate-900">
+
+      <!-- Compact Budget & Resource Direct Input Bar -->
+      <div class="p-3.5 bg-slate-950/70 border-b border-slate-800 shrink-0 space-y-2.5">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-bold uppercase tracking-wider text-slate-300">
+            🎛️ Daily Resource &amp; Budget
+          </span>
+          <span id="allocation-summary-badge" class="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+            Total Cost: $7,400 of $10,000 Budget
+          </span>
+        </div>
+
+        <!-- Compact 3-Column Row: Direct Budget Input + [-/+] Steppers for Trucks & Wellness -->
+        <div class="grid grid-cols-3 gap-2">
+          <!-- Direct Budget Input Box -->
+          <div class="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2">
+            <label for="budget-input" class="block text-[11px] font-semibold text-slate-300 mb-1">
+              💰 Daily Budget
+            </label>
+            <div class="flex items-center bg-slate-950 border border-slate-700 rounded-md px-2 py-1 focus-within:border-orange-500">
+              <span class="text-amber-400 font-bold text-xs mr-1">$</span>
+              <input
+                id="budget-input"
+                type="number"
+                min="0"
+                step="500"
+                value="10000"
+                class="w-full bg-transparent text-xs font-bold text-white focus:outline-none"
+                onchange="syncPlanWithInputs()"
+              />
+            </div>
+          </div>
+
+          <!-- Hydration Trucks [- / +] Box -->
+          <div class="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2">
+            <label for="trucks-input" class="block text-[11px] font-semibold text-slate-300 mb-1">
+              🚚 Trucks <span class="text-slate-500 font-normal">($2.5k)</span>
+            </label>
+            <div class="flex items-center justify-between bg-slate-950 border border-slate-700 rounded-md px-1 py-0.5">
+              <button
+                type="button"
+                onclick="stepValue('trucks-input', -1)"
+                class="w-6 h-6 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs flex items-center justify-center"
+              >−</button>
+              <input
+                id="trucks-input"
+                type="number"
+                min="0"
+                max="10"
+                value="2"
+                class="w-8 text-center bg-transparent text-xs font-bold text-orange-400 focus:outline-none"
+                onchange="syncPlanWithInputs()"
+              />
+              <button
+                type="button"
+                onclick="stepValue('trucks-input', 1)"
+                class="w-6 h-6 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs flex items-center justify-center"
+              >+</button>
+            </div>
+          </div>
+
+          <!-- Wellness Teams [- / +] Box -->
+          <div class="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2">
+            <label for="wellness-input" class="block text-[11px] font-semibold text-slate-300 mb-1">
+              🩺 Wellness <span class="text-slate-500 font-normal">($1.2k)</span>
+            </label>
+            <div class="flex items-center justify-between bg-slate-950 border border-slate-700 rounded-md px-1 py-0.5">
+              <button
+                type="button"
+                onclick="stepValue('wellness-input', -1)"
+                class="w-6 h-6 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs flex items-center justify-center"
+              >−</button>
+              <input
+                id="wellness-input"
+                type="number"
+                min="0"
+                max="10"
+                value="2"
+                class="w-8 text-center bg-transparent text-xs font-bold text-teal-400 focus:outline-none"
+                onchange="syncPlanWithInputs()"
+              />
+              <button
+                type="button"
+                onclick="stepValue('wellness-input', 1)"
+                class="w-6 h-6 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs flex items-center justify-center"
+              >+</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Full-Height Chatbot Conversation Stream directly below Budget Controls -->
+      <div id="chat-messages" class="flex-1 overflow-y-auto p-4 space-y-3">
+        <div class="bg-slate-800/80 border border-slate-700/70 rounded-xl p-3.5 text-xs text-slate-200 leading-relaxed">
+          <div class="font-bold text-orange-300 mb-1">👋 Dallas Daily Heat Dispatch Assistant</div>
+          Adjust your <strong>Daily Budget</strong> and <strong>Trucks / Wellness Teams</strong> right above, or click any area in the <strong>Immediate Action Ranking</strong> on the map to see why it is predicted to run hotter.
+        </div>
+      </div>
+
+      <!-- Quick Prompt Chips + Chat Input -->
+      <div class="p-3 bg-slate-950 border-t border-slate-800 space-y-2 shrink-0">
+        <div class="flex gap-1.5 overflow-x-auto pb-0.5">
+          <button onclick="sendQuickPrompt('Show today\'s Hydration Truck and Senior Wellness Check dispatch plan')" class="px-2.5 py-1 rounded-full text-[11px] bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 whitespace-nowrap">
+            ⚡ Today's Dispatch Plan
+          </button>
+          <button onclick="sendQuickPrompt('Why is Oak Cliff & Marsalis predicted to be +4.6°F hotter?')" class="px-2.5 py-1 rounded-full text-[11px] bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 whitespace-nowrap">
+            🔍 Why is Oak Cliff +4.6°F?
+          </button>
+          <button onclick="sendQuickPrompt('Why did we skip the North Dallas tract with 1,779 seniors?')" class="px-2.5 py-1 rounded-full text-[11px] bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 whitespace-nowrap">
+            ⚖️ Why skip North Dallas?
+          </button>
+        </div>
+
+        <form onsubmit="handleChatSubmit(event)" class="flex gap-2">
+          <input
+            id="chat-input"
+            type="text"
+            placeholder="Ask about a neighborhood, heat warning, or daily dispatch..."
+            class="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-orange-500"
+          />
+          <button
+            type="submit"
+            class="px-4 py-2 rounded-lg text-xs font-bold bg-orange-500 hover:bg-orange-400 text-slate-950 transition"
+          >
+            Send
+          </button>
+        </form>
+      </div>
+
+    </section>
+
+  </main>
+
+  <script>
+    let map;
+    let layerGroup;
+    let activePopup = null;
+    let currentPlan = null;
+    let selectedTractId = "48113019211";
+    let isCardOpen = true;
+
+    function initMap() {
+      // Shift initial map center slightly east so polygons sit cleanly on the left side of the floating ranking overlay
+      map = L.map("map", { zoomControl: true }).setView([32.790, -96.745], 11);
+
+      // Esri World Dark Gray Canvas (Free, Zero API Key Required, No OSM ODbL restriction)
+      L.tileLayer(
+        "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+        {
+          attribution: "Tiles &copy; Esri &mdash; NOAA Heat Watch &amp; US Census ACS",
+          maxZoom: 16,
+        }
+      ).addTo(map);
+
+      L.tileLayer(
+        "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}",
+        {
+          maxZoom: 16,
+        }
+      ).addTo(map);
+
+      layerGroup = L.layerGroup().addTo(map);
+    }
+
+    function getPolygonColor(offset) {
+      if (offset >= 4.0) return "#ef4444"; // Red - Extreme heat
+      if (offset >= 3.0) return "#f59e0b"; // Amber - Elevated heat
+      return "#10b981";                    // Emerald - Low risk
+    }
+
+    function stepValue(inputId, delta) {
+      const el = document.getElementById(inputId);
+      const next = Math.max(0, Math.min(10, (parseInt(el.value, 10) || 0) + delta));
+      el.value = next;
+      syncPlanWithInputs();
+    }
+
+    async function syncPlanWithInputs() {
+      const budget = Math.max(0, parseInt(document.getElementById("budget-input").value, 10) || 0);
+      const trucks = Math.max(0, parseInt(document.getElementById("trucks-input").value, 10) || 0);
+      const wellness = Math.max(0, parseInt(document.getElementById("wellness-input").value, 10) || 0);
+
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: "Update daily dispatch plan",
+          budget: budget,
+          hydration_trucks: trucks,
+          wellness_teams: wellness,
+          selected_tract_id: selectedTractId,
+        }),
+      });
+      const data = await res.json();
+      currentPlan = data.plan;
+      renderAll();
+    }
+
+    // Toggle neighborhood selection: clicking the SAME neighborhood a 2nd time closes the floating map card!
+    function toggleNeighborhood(tractId) {
+      if (selectedTractId === tractId && isCardOpen) {
+        isCardOpen = false;
+        closeFloatingCard();
+        renderAll();
+      } else {
+        selectedTractId = tractId;
+        isCardOpen = true;
+        renderAll();
+        const n = currentPlan.neighborhoods.find((item) => item.id === selectedTractId);
+        if (n) {
+          map.panTo([n.lat + 0.015, n.lon + 0.035], { animate: true });
+        }
+      }
+    }
+
+    function closeFloatingCard() {
+      if (activePopup) {
+        map.removeLayer(activePopup);
+        activePopup = null;
+      }
+      map.closePopup();
+    }
+
+    function renderAll() {
+      if (!currentPlan) return;
+
+      // Update summary badge above inputs
+      const badge = document.getElementById("allocation-summary-badge");
+      if (currentPlan.within_budget) {
+        badge.className = "px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30";
+        badge.textContent = `Total Cost: $${currentPlan.total_cost.toLocaleString()} of $${currentPlan.budget.toLocaleString()} Budget`;
+      } else {
+        badge.className = "px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/40";
+        badge.textContent = `⚠️ Over Budget ($${currentPlan.requested_cost.toLocaleString()}): Capped at 🚚 ${currentPlan.funded_trucks} + 🩺 ${currentPlan.funded_wellness}`;
+      }
+
+      // Render numbered Immediate Action Ranking List inside the right side of the map
+      const listEl = document.getElementById("ranking-list");
+      listEl.innerHTML = "";
+      currentPlan.neighborhoods.forEach((n, idx) => {
+        const isSelected = n.id === selectedTractId && isCardOpen;
+        const rankNum = idx + 1;
+
+        let unitBadge = `<span class="text-[10px] text-slate-500">Standby</span>`;
+        if (n.unit_type === "hydration_truck") {
+          unitBadge = `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-orange-500/20 text-orange-300 border border-orange-500/30">🚚 Truck</span>`;
+        } else if (n.unit_type === "wellness_team") {
+          unitBadge = `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-teal-500/20 text-teal-300 border border-teal-500/30">🩺 Wellness</span>`;
+        } else if (n.predicted_offset_f < 2.0) {
+          unitBadge = `<span class="text-[10px] text-emerald-400/80">Skipped</span>`;
+        }
+
+        const tempColor = n.predicted_offset_f >= 4.0
+          ? "text-red-400"
+          : n.predicted_offset_f >= 3.0
+          ? "text-amber-400"
+          : "text-emerald-400";
+
+        const row = document.createElement("div");
+        row.className = isSelected
+          ? "flex items-center justify-between px-2 py-1.5 rounded-lg bg-orange-500/25 border border-orange-500/70 cursor-pointer transition"
+          : "flex items-center justify-between px-2 py-1.5 rounded-lg bg-slate-950/80 hover:bg-slate-800/90 border border-slate-800 cursor-pointer transition";
+
+        row.innerHTML = `
+          <div class="flex items-center gap-1.5 min-w-0">
+            <span class="w-4 h-4 rounded-full text-[9px] font-extrabold flex items-center justify-center shrink-0 ${
+              rankNum <= 3 ? "bg-red-500/25 text-red-300 border border-red-500/40" : "bg-slate-800 text-slate-400"
+            }">
+              ${rankNum}
+            </span>
+            <span class="text-[11px] font-semibold text-white truncate">${n.name.split("/")[0].trim()}</span>
+          </div>
+          <div class="flex items-center gap-1.5 shrink-0">
+            <span class="text-[11px] font-bold ${tempColor}">
+              +${n.predicted_offset_f.toFixed(1)}°F
+            </span>
+            ${unitBadge}
+          </div>
+        `;
+        row.onclick = () => toggleNeighborhood(n.id);
+        listEl.appendChild(row);
+      });
+
+      renderMapLayers();
+      updateSelectedNeighborhoodUI();
+    }
+
+    function renderMapLayers() {
+      layerGroup.clearLayers();
+
+      currentPlan.neighborhoods.forEach((n, idx) => {
+        const isSelected = n.id === selectedTractId && isCardOpen;
+        const color = getPolygonColor(n.predicted_offset_f);
+
+        // Shaded neighborhood area polygon
+        const poly = L.polygon(n.polygon, {
+          color: isSelected ? "#ffffff" : color,
+          weight: isSelected ? 3 : 1.8,
+          fillColor: color,
+          fillOpacity: isSelected ? 0.45 : 0.22,
+        }).addTo(layerGroup);
+
+        poly.on("click", () => toggleNeighborhood(n.id));
+
+        // Center badge marker showing Truck / Wellness icon or Rank
+        const badgeIcon = n.unit_type === "hydration_truck"
+          ? "🚚"
+          : n.unit_type === "wellness_team"
+          ? "🩺"
+          : `#${idx + 1}`;
+
+        const markerHtml = `
+          <div style="
+            display:flex;align-items:center;justify-content:center;
+            width:30px;height:30px;border-radius:9999px;
+            background:${isSelected ? "#f97316" : "#0f172a"};
+            border:2px solid ${isSelected ? "#ffffff" : color};
+            color:#ffffff;font-size:12px;font-weight:700;
+            box-shadow:0 4px 10px rgba(0,0,0,0.6);
+          ">
+            ${badgeIcon}
+          </div>
+        `;
+
+        const marker = L.marker([n.lat, n.lon], {
+          icon: L.divIcon({
+            className: "",
+            html: markerHtml,
+            iconSize: [30, 30],
+            iconAnchor: [15, 15],
+          }),
+        }).addTo(layerGroup);
+
+        marker.on("click", () => toggleNeighborhood(n.id));
+      });
+    }
+
+    function updateSelectedNeighborhoodUI() {
+      if (!currentPlan) return;
+      const n = currentPlan.neighborhoods.find((item) => item.id === selectedTractId) || currentPlan.neighborhoods[0];
+
+      // Update top 2-stat bar
+      document.getElementById("selected-name").textContent = n.name;
+      document.getElementById("selected-intersection").textContent = n.intersection;
+      document.getElementById("station-temp-val").textContent = `${n.station_temp_f.toFixed(1)}°F`;
+      document.getElementById("predicted-temp-val").textContent = `${n.predicted_street_temp_f.toFixed(1)}°F`;
+      document.getElementById("offset-pill").textContent = `+${n.predicted_offset_f.toFixed(1)}°F`;
+      document.getElementById("selected-demographics").textContent = `${n.seniors_65_plus.toLocaleString()} Seniors (${n.senior_pct}%) · ${n.no_car_pct}% No Car`;
+
+      const warnBadge = document.getElementById("selected-warning-badge");
+      warnBadge.textContent = `${n.warning_level} (+${n.predicted_offset_f.toFixed(1)}°F)`;
+      if (n.predicted_offset_f >= 4.0) {
+        warnBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-red-500/20 text-red-300 border border-red-500/40";
+      } else if (n.predicted_offset_f >= 3.0) {
+        warnBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-amber-500/20 text-amber-300 border border-amber-500/40";
+      } else {
+        warnBadge.className = "px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-emerald-500/20 text-emerald-300 border border-emerald-500/40";
+      }
+
+      // Remove any previously open callout card
+      closeFloatingCard();
+
+      // Only open the floating explanation card if isCardOpen is true
+      if (!isCardOpen) return;
+
+      const unitLabel = n.assigned_unit
+        ? `<span style="color:#fdba74;font-weight:700;">${n.assigned_unit} Assigned</span>`
+        : `<span style="color:#94a3b8;">No unit assigned (Low risk / budget cap)</span>`;
+
+      const popupHtml = `
+        <div style="width:240px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px;">
+            <span style="font-weight:700;font-size:12px;color:#ffffff;">${n.name}</span>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span style="background:#f97316;color:#0f172a;font-weight:800;font-size:10px;padding:1px 6px;border-radius:4px;">
+                +${n.predicted_offset_f.toFixed(1)}°F
+              </span>
+              <button onclick="toggleNeighborhood('${n.id}')" style="color:#94a3b8;font-size:14px;font-weight:700;line-height:1;cursor:pointer;" title="Close">×</button>
+            </div>
+          </div>
+          <div style="font-size:11px;color:#cbd5e1;margin-bottom:6px;">
+            <strong style="color:#fda4af;">Why it's hotter:</strong> ${n.why_short}
+          </div>
+          <div style="font-size:11px;padding-top:5px;border-top:1px solid rgba(148,163,184,0.2);">
+            ${unitLabel}
+          </div>
+        </div>
+      `;
+
+      // Anchor callout just above the top edge of the neighborhood polygon so it doesn't collide with the right-side ranking list
+      const northLat = n.polygon[0][0];
+      activePopup = L.popup({
+        closeButton: false,
+        autoClose: true,
+        closeOnClick: false,
+        offset: [0, -6],
+      })
+        .setLatLng([northLat, n.lon])
+        .setContent(popupHtml)
+        .openOn(map);
+    }
+
+    function appendMessage(role, markdownText) {
+      const container = document.getElementById("chat-messages");
+      const div = document.createElement("div");
+      if (role === "user") {
+        div.className = "ml-8 bg-orange-500/20 border border-orange-500/40 rounded-xl p-3 text-xs text-orange-100";
+        div.textContent = markdownText;
+      } else {
+        div.className = "mr-4 bg-slate-800/90 border border-slate-700 rounded-xl p-3.5 text-xs text-slate-200 prose-chat leading-relaxed";
+        div.innerHTML = marked.parse(markdownText);
+      }
+      container.appendChild(div);
+      container.scrollTop = container.scrollHeight;
+    }
+
+    async function sendQuickPrompt(text) {
+      document.getElementById("chat-input").value = text;
+      await submitMessage(text);
+    }
+
+    async function handleChatSubmit(e) {
+      e.preventDefault();
+      const input = document.getElementById("chat-input");
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = "";
+      await submitMessage(text);
+    }
+
+    async function submitMessage(text) {
+      appendMessage("user", text);
+      const budget = Math.max(0, parseInt(document.getElementById("budget-input").value, 10) || 0);
+      const trucks = Math.max(0, parseInt(document.getElementById("trucks-input").value, 10) || 0);
+      const wellness = Math.max(0, parseInt(document.getElementById("wellness-input").value, 10) || 0);
+
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: text,
+          budget: budget,
+          hydration_trucks: trucks,
+          wellness_teams: wellness,
+          selected_tract_id: selectedTractId,
+        }),
+      });
+      const data = await res.json();
+      currentPlan = data.plan;
+      if (data.highlight_tract_id) {
+        selectedTractId = data.highlight_tract_id;
+        isCardOpen = true;
+      }
+      appendMessage("agent", data.reply);
+      renderAll();
+      const n = currentPlan.neighborhoods.find((item) => item.id === selectedTractId);
+      if (n) {
+        map.panTo([n.lat + 0.015, n.lon + 0.035], { animate: true });
+      }
+    }
+
+    window.addEventListener("DOMContentLoaded", async () => {
+      initMap();
+      const res = await fetch("/api/initial-data");
+      currentPlan = await res.json();
+      renderAll();
+    });
+  </script>
+</body>
+</html>
